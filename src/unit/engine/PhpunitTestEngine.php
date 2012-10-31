@@ -37,6 +37,7 @@ final class PhpunitTestEngine extends ArcanistBaseUnitTestEngine {
 
     $this->projectRoot = $this->getWorkingCopy()->getProjectRoot();
     $this->affectedTests = array();
+    $this->setEnableCoverage($this->getWorkingCopy()->getConfigFromAnySource('unit.coverage'));
     foreach ($this->getPaths() as $path) {
 
       $path = Filesystem::resolvePath($path, $this->projectRoot);

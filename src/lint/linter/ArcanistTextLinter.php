@@ -79,13 +79,13 @@ final class ArcanistTextLinter extends ArcanistLinter {
       return;
     }
 
-    $this->lintCharset($path);
+    //$this->lintCharset($path);
 
     if ($this->didStopAllLinters()) {
       return;
     }
 
-    $this->lintLineLength($path);
+    //$this->lintLineLength($path);
     $this->lintEOFNewline($path);
     $this->lintTrailingWhitespace($path);
 
