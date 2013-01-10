@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Show which revision or revisions are in the working copy.
  *
@@ -89,20 +73,15 @@ EOTEXT
 
     $arg_commit = $this->getArgument('commit');
     if (count($arg_commit)) {
-      if (!$repository_api->supportsRelativeLocalCommits()) {
-        throw new ArcanistUsageException(
-          "This version control system does not support relative commits.");
-      } else {
-        $repository_api->parseRelativeLocalCommit($arg_commit);
-      }
+      $this->parseBaseCommitArgument($arg_commit);
     }
     $arg = $arg_commit ? ' '.head($arg_commit) : '';
 
     $repository_api->setBaseCommitArgumentRules(
       $this->getArgument('base', ''));
 
-    if ($repository_api->supportsRelativeLocalCommits()) {
-      $relative = $repository_api->getRelativeCommit();
+    if ($repository_api->supportsCommitRanges()) {
+      $relative = $repository_api->getBaseCommit();
 
       if ($this->getArgument('show-base')) {
         echo $relative."\n";

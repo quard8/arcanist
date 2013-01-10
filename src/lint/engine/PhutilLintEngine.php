@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Lint engine which enforces libphutil rules.
  *
@@ -66,23 +50,21 @@ class PhutilLintEngine extends ArcanistLintEngine {
       ->setCustomSeverityMap($this->getXHPASTSeverityMap())
       ->setPaths(preg_grep('/\.php$/', $paths));
 
-    $linters[] = id(new ArcanistApacheLicenseLinter())
-      ->setPaths(preg_grep('/\.(php|cpp|hpp|l|y)$/', $paths));
-
     return $linters;
   }
 
   private function getXHPASTSeverityMap() {
     $error = ArcanistLintSeverity::SEVERITY_ERROR;
     $warning = ArcanistLintSeverity::SEVERITY_WARNING;
+    $advice = ArcanistLintSeverity::SEVERITY_ADVICE;
 
     return array(
       ArcanistXHPASTLinter::LINT_PHP_53_FEATURES          => $error,
       ArcanistXHPASTLinter::LINT_PHP_54_FEATURES          => $error,
       ArcanistXHPASTLinter::LINT_PHT_WITH_DYNAMIC_STRING  => $error,
       ArcanistXHPASTLinter::LINT_COMMENT_SPACING          => $error,
-
       ArcanistXHPASTLinter::LINT_RAGGED_CLASSTREE_EDGE    => $warning,
+      ArcanistXHPASTLinter::LINT_TODO_COMMENT             => $advice,
     );
   }
 }

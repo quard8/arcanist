@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Represents a change to an individual path.
  *
@@ -204,6 +188,42 @@ final class ArcanistDiffChange {
 
   public function getHunks() {
     return $this->hunks;
+  }
+
+  /**
+   * @return array $old => array($new, )
+   */
+  public function buildLineMap() {
+    $line_map = array();
+    $old = 1;
+    $new = 1;
+    foreach ($this->getHunks() as $hunk) {
+      for ($n = $old; $n < $hunk->getOldOffset(); $n++) {
+        $line_map[$n] = array($n + $new - $old);
+      }
+      $old = $hunk->getOldOffset();
+      $new = $hunk->getNewOffset();
+      $olds = array();
+      $news = array();
+      $lines = explode("\n", $hunk->getCorpus());
+      foreach ($lines as $line) {
+        $type = substr($line, 0, 1);
+        if ($type == '-' || $type == ' ') {
+          $olds[] = $old;
+          $old++;
+        }
+        if ($type == '+' || $type == ' ') {
+          $news[] = $new;
+          $new++;
+        }
+        if ($type == ' ' || $type == '') {
+          $line_map += array_fill_keys($olds, $news);
+          $olds = array();
+          $news = array();
+        }
+      }
+    }
+    return $line_map;
   }
 
   public function convertToBinaryChange() {

@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Displays user's git branches
  *
@@ -32,6 +16,7 @@ final class ArcanistBranchWorkflow extends ArcanistBaseWorkflow {
   public function getCommandSynopses() {
     return phutil_console_format(<<<EOTEXT
       **branch** [__options__]
+      **branch** __name__ [__start__]
 EOTEXT
       );
   }
@@ -47,6 +32,10 @@ EOTEXT
 
           By default, branches that are "Closed" or "Abandoned" are not
           displayed. You can show them with __--view-all__.
+
+          With __name__, it creates or checks out a branch. If the branch
+          __name__ doesn't exist and is in format D123 then the branch of
+          revision D123 is checked out.
 EOTEXT
       );
   }
@@ -72,6 +61,7 @@ EOTEXT
       'by-status' => array(
         'help' => 'Sort branches by status instead of time.',
       ),
+      '*' => 'names',
     );
   }
 
@@ -82,12 +72,20 @@ EOTEXT
         'arc branch is only supported under git.');
     }
 
+    $names = $this->getArgument('names');
+    if ($names) {
+      if (count($names) > 2) {
+        throw new ArcanistUsageException("Specify only one branch.");
+      }
+      return $this->checkoutBranch($names);
+    }
+
     $branches = $repository_api->getAllBranches();
     if (!$branches) {
       throw new ArcanistUsageException('No branches in this working copy.');
     }
 
-    $branches = $this->loadCommitInfo($branches, $repository_api);
+    $branches = $this->loadCommitInfo($branches);
 
     $revisions = $this->loadRevisions($branches);
 
@@ -96,9 +94,47 @@ EOTEXT
     return 0;
   }
 
-  private function loadCommitInfo(
-    array $branches,
-    ArcanistRepositoryAPI $repository_api) {
+  private function checkoutBranch(array $names) {
+    $api = $this->getRepositoryAPI();
+
+    list($err, $stdout, $stderr) = $api->execManualLocal(
+      'checkout %s',
+      reset($names));
+
+    if ($err) {
+      $match = null;
+      if (preg_match('/^D(\d+)$/', reset($names), $match)) {
+        try {
+          $diff = $this->getConduit()->callMethodSynchronous(
+            'differential.getdiff',
+            array(
+              'revision_id' => $match[1],
+            ));
+
+          if ($diff['branch'] != '') {
+            $names[0] = $diff['branch'];
+            list($err, $stdout, $stderr) = $api->execManualLocal(
+              'checkout %s',
+              reset($names));
+          }
+        } catch (ConduitException $ex) {
+        }
+      }
+    }
+
+    if ($err) {
+      list($err, $stdout, $stderr) = $api->execManualLocal(
+        'checkout -b %Ls',
+        $names);
+    }
+
+    echo $stdout;
+    fprintf(STDERR, $stderr);
+    return $err;
+  }
+
+  private function loadCommitInfo(array $branches) {
+    $repository_api = $this->getRepositoryAPI();
 
     $futures = array();
     foreach ($branches as $branch) {
@@ -113,7 +149,7 @@ EOTEXT
 
     $branches = ipull($branches, null, 'name');
 
-    foreach (Futures($futures) as $name => $future) {
+    foreach (Futures($futures)->limit(16) as $name => $future) {
       list($info) = $future->resolvex();
       list($hash, $epoch, $tree, $desc, $text) = explode("\1", trim($info), 5);
 

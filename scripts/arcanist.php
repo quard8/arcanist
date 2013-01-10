@@ -1,22 +1,6 @@
 #!/usr/bin/env php
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 sanity_check_environment();
 
 require_once dirname(__FILE__).'/__init_script__.php';
@@ -57,12 +41,15 @@ $force_conduit = $args->getArg('conduit-uri');
 $force_conduit_version = $args->getArg('conduit-version');
 $conduit_timeout = $args->getArg('conduit-timeout');
 $load = $args->getArg('load-phutil-library');
+$help = $args->getArg('help');
 
 $argv = $args->getUnconsumedArgumentVector();
 $args = array_values($argv);
 
 $working_directory = getcwd();
 $console = PhutilConsole::getConsole();
+$config = null;
+$workflow = null;
 
 try {
 
@@ -74,12 +61,23 @@ try {
     phutil_get_library_root('arcanist'));
 
   if (!$args) {
-    throw new ArcanistUsageException("No command provided. Try 'arc help'.");
+    if ($help) {
+      $args = array('help');
+    } else {
+      throw new ArcanistUsageException("No command provided. Try 'arc help'.");
+    }
+  } else if ($help) {
+    array_unshift($args, 'help');
   }
 
   $global_config = ArcanistBaseWorkflow::readGlobalArcConfig();
   $system_config = ArcanistBaseWorkflow::readSystemArcConfig();
   $working_copy = ArcanistWorkingCopyIdentity::newFromPath($working_directory);
+
+  reenter_if_this_is_arcanist_or_libphutil(
+    $console,
+    $working_copy,
+    $original_argv);
 
   // Load additional libraries, which can provide new classes like configuration
   // overrides, linters and lint engines, unit test engines, etc.
@@ -125,70 +123,16 @@ try {
 
   $user_config = ArcanistBaseWorkflow::readUserConfigurationFile();
 
-  $config = $working_copy->getConfig('arcanist_configuration');
-  if ($config) {
-    $config = new $config();
+  $config_class = $working_copy->getConfig('arcanist_configuration');
+  if ($config_class) {
+    $config = new $config_class();
   } else {
     $config = new ArcanistConfiguration();
   }
 
   $command = strtolower($args[0]);
   $args = array_slice($args, 1);
-  $workflow = $config->buildWorkflow($command);
-  if (!$workflow) {
-
-    // If the user has an alias, like 'arc alias dhelp diff help', look it up
-    // and substitute it. We do this only after trying to resolve the workflow
-    // normally to prevent you from doing silly things like aliasing 'alias'
-    // to something else.
-
-    $aliases = ArcanistAliasWorkflow::getAliases($working_copy);
-    list($new_command, $args) = ArcanistAliasWorkflow::resolveAliases(
-      $command,
-      $config,
-      $args,
-      $working_copy);
-
-    $full_alias = idx($aliases, $command, array());
-    $full_alias = implode(' ', $full_alias);
-
-    // Run shell command aliases.
-
-    if (ArcanistAliasWorkflow::isShellCommandAlias($new_command)) {
-      $shell_cmd = substr($full_alias, 1);
-
-      $console->writeLog(
-        "[alias: 'arc %s' -> $ %s]",
-        $command,
-        $shell_cmd);
-
-      if ($args) {
-        $err = phutil_passthru('%C %Ls', $shell_cmd, $args);
-      } else {
-        $err = phutil_passthru('%C', $shell_cmd);
-      }
-      exit($err);
-    }
-
-    // Run arc command aliases.
-
-    if ($new_command) {
-      $workflow = $config->buildWorkflow($new_command);
-      if ($workflow) {
-        $console->writeLog(
-          "[alias: 'arc %s' -> 'arc %s']\n",
-          $command,
-          $full_alias);
-        $command = $new_command;
-      }
-    }
-
-    if (!$workflow) {
-      throw new ArcanistUsageException(
-        "Unknown command '{$command}'. Try 'arc help'.");
-    }
-  }
-
+  $workflow = $config->selectWorkflow($command, $args, $working_copy, $console);
   $workflow->setArcanistConfiguration($config);
   $workflow->setCommand($command);
   $workflow->setWorkingDirectory($working_directory);
@@ -327,7 +271,9 @@ try {
       $ex->getMessage());
   }
 
-  $config->didAbortWorkflow($command, $workflow, $ex);
+  if ($config) {
+    $config->didAbortWorkflow($command, $workflow, $ex);
+  }
 
   if ($config_trace_mode) {
     echo "\n";
@@ -541,3 +487,69 @@ function arcanist_load_libraries(
     }
   }
 }
+
+
+/**
+ * NOTE: SPOOKY BLACK MAGIC
+ *
+ * When arc is run in a copy of arcanist other than itself, or a copy of
+ * libphutil other than the one we loaded, reenter the script and force it
+ * to use the current working directory instead of the default.
+ *
+ * In the case of execution inside arcanist/, we force execution of the local
+ * arc binary.
+ *
+ * In the case of execution inside libphutil/, we force the local copy to load
+ * instead of the one selected by default rules.
+ *
+ * @param PhutilConsole                 Console.
+ * @param ArcanistWorkingCopyIdentity   The current working copy.
+ * @param array                         Original arc arguments.
+ * @return void
+ */
+function reenter_if_this_is_arcanist_or_libphutil(
+  PhutilConsole $console,
+  ArcanistWorkingCopyIdentity $working_copy,
+  array $original_argv) {
+
+  $project_id = $working_copy->getProjectID();
+  if ($project_id != 'arcanist' && $project_id != 'libphutil') {
+    // We're not in a copy of arcanist or libphutil.
+    return;
+  }
+
+  $library_names = array(
+    'arcanist'  => 'arcanist',
+    'libphutil' => 'phutil',
+  );
+
+  $library_root = phutil_get_library_root($library_names[$project_id]);
+  $project_root = $working_copy->getProjectRoot();
+  if (Filesystem::isDescendant($library_root, $project_root)) {
+    // We're in a copy of arcanist or libphutil, but already loaded the correct
+    // copy. Continue execution normally.
+    return;
+  }
+
+  if ($project_id == 'libphutil') {
+    $console->writeLog(
+      "This is libphutil! Forcing this copy to load...\n");
+    $original_argv[0] = dirname(phutil_get_library_root('arcanist')).'/bin/arc';
+    $libphutil_path = $project_root;
+  } else {
+    $console->writeLog(
+      "This is arcanist! Forcing this copy to run...\n");
+    $original_argv[0] = $project_root.'/bin/arc';
+    $libphutil_path = dirname(phutil_get_library_root('phutil'));
+  }
+
+  $err = phutil_passthru(
+    phutil_is_windows()
+      ? 'set ARC_PHUTIL_PATH=%s & %Ls'
+      : 'ARC_PHUTIL_PATH=%s %Ls',
+    $libphutil_path,
+    $original_argv);
+
+  exit($err);
+}
+

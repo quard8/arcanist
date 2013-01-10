@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Runs lint rules on changes.
  *
@@ -29,7 +13,10 @@ class ArcanistLintWorkflow extends ArcanistBaseWorkflow {
   const RESULT_SKIP       = 3;
   const RESULT_POSTPONED  = 4;
 
+  const DEFAULT_SEVERITY = ArcanistLintSeverity::SEVERITY_ADVICE;
+
   private $unresolvedMessages;
+  private $shouldLintAll;
   private $shouldAmendChanges = false;
   private $shouldAmendWithoutPrompt = false;
   private $shouldAmendAutofixesWithoutPrompt = false;
@@ -96,6 +83,11 @@ EOTEXT
           "With 'json', show lint warnings in machine-readable JSON format. ".
           "With 'compiler', show lint warnings in suitable for your editor."
       ),
+      'only-new' => array(
+        'param' => 'bool',
+        'supports' => array('git', 'hg'), // TODO: svn
+        'help' => 'Display only messages not present in the original code.',
+      ),
       'engine' => array(
         'param' => 'classname',
         'help' =>
@@ -125,8 +117,25 @@ EOTEXT
           'When linting git repositories, amend HEAD with autofix '.
           'patches suggested by lint without prompting.',
       ),
+      'severity' => array(
+        'param' => 'string',
+        'help' =>
+          "Set minimum message severity. One of: '".
+          implode(
+            "', '",
+            array_keys(ArcanistLintSeverity::getLintSeverities())).
+          "'. Defaults to '".self::DEFAULT_SEVERITY."'.",
+      ),
+      'cache' => array(
+        'param' => 'bool',
+        'help' => "0 to disable cache, 1 to enable (default).",
+      ),
       '*' => 'paths',
     );
+  }
+
+  public function requiresAuthentication() {
+    return (bool)$this->getArgument('only-new');
   }
 
   public function requiresWorkingCopy() {
@@ -135,6 +144,14 @@ EOTEXT
 
   public function requiresRepositoryAPI() {
     return true;
+  }
+
+  private function getCacheKey() {
+    return implode("\n", array(
+      get_class($this->engine),
+      $this->getArgument('severity', self::DEFAULT_SEVERITY),
+      $this->shouldLintAll,
+    ));
   }
 
   public function run() {
@@ -152,17 +169,18 @@ EOTEXT
 
     $rev = $this->getArgument('rev');
     $paths = $this->getArgument('paths');
+    $use_cache = $this->getArgument('cache', true);
 
     if ($rev && $paths) {
       throw new ArcanistUsageException("Specify either --rev or paths.");
     }
 
-    $should_lint_all = $this->getArgument('lintall');
+    $this->shouldLintAll = $this->getArgument('lintall');
     if ($paths) {
       // NOTE: When the user specifies paths, we imply --lintall and show all
       // warnings for the paths in question. This is easier to deal with for
       // us and less confusing for users.
-      $should_lint_all = true;
+      $this->shouldLintAll = true;
     }
 
     $paths = $this->selectPathsForWorkflow($paths, $rev);
@@ -178,13 +196,32 @@ EOTEXT
     $this->engine = $engine;
     $engine->setWorkingCopy($working_copy);
 
-    $engine->setMinimumSeverity(ArcanistLintSeverity::SEVERITY_ADVICE);
+    $engine->setMinimumSeverity(
+      $this->getArgument('severity', self::DEFAULT_SEVERITY));
+
+    if ($use_cache) {
+      $cache = $this->readScratchJSONFile('lint-cache.json');
+      $cache = idx($cache, $this->getCacheKey(), array());
+      $cache = array_intersect_key($cache, array_flip($paths));
+      $cached = array();
+      foreach ($cache as $path => $messages) {
+        $abs_path = $engine->getFilePathOnDisk($path);
+        if (!Filesystem::pathExists($abs_path)) {
+          continue;
+        }
+        $messages = idx($messages, md5_file($abs_path));
+        if ($messages !== null) {
+          $cached[$path] = $messages;
+        }
+      }
+      $engine->setCachedResults($cached);
+    }
 
     // Propagate information about which lines changed to the lint engine.
     // This is used so that the lint engine can drop warning messages
     // concerning lines that weren't in the change.
     $engine->setPaths($paths);
-    if (!$should_lint_all) {
+    if (!$this->shouldLintAll) {
       foreach ($paths as $path) {
         // Note that getChangedLines() returns null to indicate that a file
         // is binary or a directory (i.e., changed lines are not relevant).
@@ -194,11 +231,47 @@ EOTEXT
       }
     }
 
-    // Enable possible async linting only for 'arc diff' not 'arc unit'
+    // Enable possible async linting only for 'arc diff' not 'arc lint'
     if ($this->getParentWorkflow()) {
       $engine->setEnableAsyncLint(true);
     } else {
       $engine->setEnableAsyncLint(false);
+    }
+
+    if ($this->getArgument('only-new')) {
+      $conduit = $this->getConduit();
+      $api = $this->getRepositoryAPI();
+      if ($rev) {
+        $api->setBaseCommit($rev);
+      }
+      $svn_root = id(new PhutilURI($api->getSourceControlPath()))->getPath();
+
+      $all_paths = array();
+      foreach ($paths as $path) {
+        $path = str_replace(DIRECTORY_SEPARATOR, '/', $path);
+        $full_paths = array($path);
+
+        $change = $this->getChange($path);
+        $type = $change->getType();
+        if (ArcanistDiffChangeType::isOldLocationChangeType($type)) {
+          $full_paths = $change->getAwayPaths();
+        } else if (ArcanistDiffChangeType::isNewLocationChangeType($type)) {
+          continue;
+        } else if (ArcanistDiffChangeType::isDeleteChangeType($type)) {
+          continue;
+        }
+
+        foreach ($full_paths as $full_path) {
+          $all_paths[$svn_root.'/'.$full_path] = $path;
+        }
+      }
+
+      $lint_future = $conduit->callMethod('diffusion.getlintmessages', array(
+        'arcanistProject' => $this->getWorkingCopy()->getProjectID(),
+        'branch' => '', // TODO: Tracking branch.
+        'commit' => $api->getBaseCommit(),
+        'files' => array_keys($all_paths),
+      ));
     }
 
     $failed = null;
@@ -209,6 +282,65 @@ EOTEXT
     }
 
     $results = $engine->getResults();
+
+    if ($this->getArgument('only-new')) {
+      $total = 0;
+      foreach ($results as $result) {
+        $total += count($result->getMessages());
+      }
+
+      // Don't wait for response with default value of --only-new.
+      $timeout = null;
+      if ($this->getArgument('only-new') === null || !$total) {
+        $timeout = 0;
+      }
+
+      $raw_messages = $this->resolveCall($lint_future, $timeout);
+      if ($raw_messages && $total) {
+        $old_messages = array();
+        $line_maps = array();
+        foreach ($raw_messages as $message) {
+          $path = $all_paths[$message['path']];
+          $line = $message['line'];
+          $code = $message['code'];
+
+          if (!isset($line_maps[$path])) {
+            $line_maps[$path] = $this->getChange($path)->buildLineMap();
+          }
+
+          $new_lines = idx($line_maps[$path], $line);
+          if (!$new_lines) { // Unmodified lines after last hunk.
+            $last_old = ($line_maps[$path] ? last_key($line_maps[$path]) : 0);
+            $news = array_filter($line_maps[$path]);
+            $last_new = ($news ? last(end($news)) : 0);
+            $new_lines = array($line + $last_new - $last_old);
+          }
+
+          $error = array($code => array(true));
+          foreach ($new_lines as $new) {
+            if (isset($old_messages[$path][$new])) {
+              $old_messages[$path][$new][$code][] = true;
+              break;
+            }
+            $old_messages[$path][$new] = &$error;
+          }
+          unset($error);
+        }
+
+        foreach ($results as $result) {
+          foreach ($result->getMessages() as $message) {
+            $path = str_replace(DIRECTORY_SEPARATOR, '/', $message->getPath());
+            $line = $message->getLine();
+            $code = $message->getCode();
+            if (!empty($old_messages[$path][$line][$code])) {
+              $message->setObsolete(true);
+              array_pop($old_messages[$path][$line][$code]);
+            }
+          }
+          $result->sortAndFilterMessages();
+        }
+      }
+    }
 
     // It'd be nice to just return a single result from the run method above
     // which contains both the lint messages and the postponed linters.
@@ -316,10 +448,6 @@ EOTEXT
       }
     }
 
-    if ($failed) {
-      throw $failed;
-    }
-
     $repository_api = $this->getRepositoryAPI();
     if ($wrote_to_disk &&
         ($repository_api instanceof ArcanistGitAPI) &&
@@ -346,6 +474,15 @@ EOTEXT
       }
     }
 
+    if ($this->getArgument('output') == 'json') {
+      // NOTE: Required by save_lint.php in Phabricator.
+      return 0;
+    }
+
+    if ($failed) {
+      throw $failed;
+    }
+
     $unresolved = array();
     $has_warnings = false;
     $has_errors = false;
@@ -363,6 +500,36 @@ EOTEXT
       }
     }
     $this->unresolvedMessages = $unresolved;
+
+    $cache = $this->readScratchJSONFile('lint-cache.json');
+    $cached = idx($cache, $this->getCacheKey(), array());
+    if ($cached || $use_cache) {
+      foreach ($results as $result) {
+        $path = $result->getPath();
+        if (!$use_cache) {
+          unset($cached[$path]);
+          continue;
+        }
+        $abs_path = $engine->getFilePathOnDisk($path);
+        if (!Filesystem::pathExists($abs_path)) {
+          continue;
+        }
+        $hash = md5_file($abs_path);
+        $version = $result->getCacheVersion();
+        $cached[$path] = array($hash => array($version => array()));
+        foreach ($result->getMessages() as $message) {
+          if ($message->isUncacheable()) {
+            continue;
+          }
+          if (!$message->isPatchApplied()) {
+            $cached[$path][$hash][$version][] = $message->toDictionary();
+          }
+        }
+      }
+      $cache[$this->getCacheKey()] = $cached;
+      // TODO: Garbage collection.
+      $this->writeScratchJSONFile('lint-cache.json', $cache);
+    }
 
     // Take the most severe lint message severity and use that
     // as the result code.

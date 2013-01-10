@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Interfaces with Subversion working copies.
  *
@@ -31,6 +15,7 @@ final class ArcanistSubversionAPI extends ArcanistRepositoryAPI {
   protected $svnDiffRaw = array();
 
   private $svnBaseRevisionNumber;
+  private $statusPaths = array();
 
   public function getSourceControlSystemName() {
     return 'svn';
@@ -62,17 +47,13 @@ final class ArcanistSubversionAPI extends ArcanistRepositoryAPI {
     return $future;
   }
 
-
-  public function hasMergeConflicts() {
-    foreach ($this->getSVNStatus() as $path => $mask) {
-      if ($mask & self::FLAG_CONFLICT) {
-        return true;
-      }
-    }
-    return false;
+  protected function buildCommitRangeStatus() {
+    // In SVN, the commit range is always "uncommitted changes", so these
+    // statuses are equivalent.
+    return $this->getUncommittedStatus();
   }
 
-  public function getWorkingCopyStatus() {
+  protected function buildUncommittedStatus() {
     return $this->getSVNStatus();
   }
 
@@ -83,89 +64,66 @@ final class ArcanistSubversionAPI extends ArcanistRepositoryAPI {
     return $this->svnBaseRevisions;
   }
 
+  public function limitStatusToPaths(array $paths) {
+    $this->statusPaths = $paths;
+    return $this;
+  }
+
   public function getSVNStatus($with_externals = false) {
     if ($this->svnStatus === null) {
-      list($status) = $this->execxLocal('--xml status');
-      $xml = new SimpleXMLElement($status);
-
-      if (count($xml->target) != 1) {
-        throw new Exception("Expected exactly one XML status target.");
+      if ($this->statusPaths) {
+        list($status) = $this->execxLocal(
+          '--xml status %Ls',
+          $this->statusPaths);
+      } else {
+        list($status) = $this->execxLocal('--xml status');
       }
+      $xml = new SimpleXMLElement($status);
 
       $externals = array();
       $files = array();
 
-      $target = $xml->target[0];
-      $this->svnBaseRevisions = array();
-      foreach ($target->entry as $entry) {
-        $path = (string)$entry['path'];
-        $mask = 0;
+      foreach ($xml->target as $target) {
+        $this->svnBaseRevisions = array();
+        foreach ($target->entry as $entry) {
+          $path = (string)$entry['path'];
+          // On Windows, we get paths with backslash directory separators here.
+          // Normalize them to the format everything else expects and generates.
+          if (phutil_is_windows()) {
+            $path = str_replace(DIRECTORY_SEPARATOR, '/', $path);
+          }
+          $mask = 0;
 
-        $props = (string)($entry->{'wc-status'}[0]['props']);
-        $item  = (string)($entry->{'wc-status'}[0]['item']);
+          $props = (string)($entry->{'wc-status'}[0]['props']);
+          $item  = (string)($entry->{'wc-status'}[0]['item']);
 
-        $base = (string)($entry->{'wc-status'}[0]['revision']);
-        $this->svnBaseRevisions[$path] = $base;
+          $base = (string)($entry->{'wc-status'}[0]['revision']);
+          $this->svnBaseRevisions[$path] = $base;
 
-        switch ($props) {
-          case 'none':
-          case 'normal':
-            break;
-          case 'modified':
-            $mask |= self::FLAG_MODIFIED;
-            break;
-          default:
-            throw new Exception("Unrecognized property status '{$props}'.");
-        }
+          switch ($props) {
+            case 'none':
+            case 'normal':
+              break;
+            case 'modified':
+              $mask |= self::FLAG_MODIFIED;
+              break;
+            default:
+              throw new Exception("Unrecognized property status '{$props}'.");
+          }
 
-        switch ($item) {
-          case 'normal':
-            break;
-          case 'external':
-            $mask |= self::FLAG_EXTERNALS;
+          $mask |= $this->parseSVNStatus($item);
+          if ($item == 'external') {
             $externals[] = $path;
-            break;
-          case 'unversioned':
-            $mask |= self::FLAG_UNTRACKED;
-            break;
-          case 'obstructed':
-            $mask |= self::FLAG_OBSTRUCTED;
-            break;
-          case 'missing':
-            $mask |= self::FLAG_MISSING;
-            break;
-          case 'added':
-            $mask |= self::FLAG_ADDED;
-            break;
-          case 'replaced':
-            // This is the result of "svn rm"-ing a file, putting another one
-            // in place of it, and then "svn add"-ing the new file. Just treat
-            // this as equivalent to "modified".
-            $mask |= self::FLAG_MODIFIED;
-            break;
-          case 'modified':
-            $mask |= self::FLAG_MODIFIED;
-            break;
-          case 'deleted':
-            $mask |= self::FLAG_DELETED;
-            break;
-          case 'conflicted':
+          }
+
+          // This is new in or around Subversion 1.6.
+          $tree_conflicts = ($entry->{'wc-status'}[0]['tree-conflicted']);
+          if ((string)$tree_conflicts) {
             $mask |= self::FLAG_CONFLICT;
-            break;
-          case 'incomplete':
-            $mask |= self::FLAG_INCOMPLETE;
-            break;
-          default:
-            throw new Exception("Unrecognized item status '{$item}'.");
-        }
+          }
 
-        // This is new in or around Subversion 1.6.
-        $tree_conflicts = (string)($entry->{'wc-status'}[0]['tree-conflicted']);
-        if ($tree_conflicts) {
-          $mask |= self::FLAG_CONFLICT;
+          $files[$path] = $mask;
         }
-
-        $files[$path] = $mask;
       }
 
       foreach ($files as $path => $mask) {
@@ -189,6 +147,44 @@ final class ArcanistSubversionAPI extends ArcanistRepositoryAPI {
     }
 
     return $status;
+  }
+
+  private function parseSVNStatus($item) {
+    switch ($item) {
+      case 'normal':
+        return 0;
+      case 'external':
+        return self::FLAG_EXTERNALS;
+      case 'unversioned':
+        return self::FLAG_UNTRACKED;
+      case 'obstructed':
+        return self::FLAG_OBSTRUCTED;
+      case 'missing':
+        return self::FLAG_MISSING;
+      case 'added':
+        return self::FLAG_ADDED;
+      case 'replaced':
+        // This is the result of "svn rm"-ing a file, putting another one
+        // in place of it, and then "svn add"-ing the new file. Just treat
+        // this as equivalent to "modified".
+        return self::FLAG_MODIFIED;
+      case 'modified':
+        return self::FLAG_MODIFIED;
+      case 'deleted':
+        return self::FLAG_DELETED;
+      case 'conflicted':
+        return self::FLAG_CONFLICT;
+      case 'incomplete':
+        return self::FLAG_INCOMPLETE;
+      default:
+        throw new Exception("Unrecognized item status '{$item}'.");
+    }
+  }
+
+  public function addToCommit(array $paths) {
+    $this->execxLocal(
+      'add -- %Ls',
+      $paths);
   }
 
   public function getSVNProperty($path, $property) {
@@ -481,6 +477,36 @@ Index: {$path}
 EODIFF;
   }
 
+  public function getAllFiles() {
+    // TODO: Handle paths with newlines.
+    $future = $this->buildLocalFuture(array('list -R'));
+    return new PhutilCallbackFilterIterator(
+      new LinesOfALargeExecFuture($future),
+      array($this, 'filterFiles'));
+  }
+
+  public function getChangedFiles($since_commit) {
+    // TODO: Handle paths with newlines.
+    list($stdout) = $this->execxLocal(
+      '--xml diff --revision %s:HEAD --summarize',
+      $since_commit);
+    $xml = new SimpleXMLElement($stdout);
+
+    $return = array();
+    foreach ($xml->paths[0]->path as $path) {
+      $return[(string)$path] = $this->parseSVNStatus($path['item']);
+    }
+    return $return;
+  }
+
+  public function filterFiles($path) {
+    // NOTE: SVN uses '/' also on Windows.
+    if ($path == '' || substr($path, -1) == '/') {
+      return null;
+    }
+    return $path;
+  }
+
   public function getBlame($path) {
     $blame = array();
 
@@ -541,7 +567,11 @@ EODIFF;
     return false;
   }
 
-  public function supportsRelativeLocalCommits() {
+  public function supportsCommitRanges() {
+    return false;
+  }
+
+  public function supportsLocalCommits() {
     return false;
   }
 

@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Uses "JSHint" to detect errors and potential problems in JavaScript code.
  * To use this linter, you must install jshint through NPM (Node Package
@@ -78,12 +62,14 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
     $config = $working_copy->getConfig('lint.jshint.config');
 
     if ($config !== null) {
-      $config = Filesystem::resolvePath($config, $working_copy->getProjectRoot());
+      $config = Filesystem::resolvePath(
+        $config,
+        $working_copy->getProjectRoot());
 
       if (!Filesystem::pathExists($config)) {
         throw new ArcanistUsageException(
-          "Unable to find custom options file defined by 'lint.jshint.config'. ".
-          "Make sure that the path is correct.");
+          "Unable to find custom options file defined by ".
+          "'lint.jshint.config'. Make sure that the path is correct.");
       }
 
       $options .= ' --config '.$config;
@@ -108,8 +94,8 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
         throw new ArcanistUsageException(
           "Unable to find JSHint binary in a specified directory. Make sure ".
           "that 'lint.jshint.prefix' and 'lint.jshint.bin' keys are set ".
-          "correctly. If you'd rather use a copy of JSHint installed globally, ".
-          "you can just remove these keys from your .arcconfig");
+          "correctly. If you'd rather use a copy of JSHint installed ".
+          "globally, you can just remove these keys from your .arcconfig");
       }
 
       return $bin;
@@ -136,7 +122,11 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
 
     foreach ($paths as $path) {
       $filepath = $this->getEngine()->getFilePathOnDisk($path);
-      $futures[$path] = new ExecFuture("{$jshint_bin} {$filepath} ${jshint_options}");
+      $futures[$path] = new ExecFuture(
+        "%s %s %C",
+        $jshint_bin,
+        $filepath,
+        $jshint_options);
     }
 
     foreach (Futures($futures)->limit(8) as $path => $future) {

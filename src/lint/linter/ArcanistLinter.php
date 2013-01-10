@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Implements lint rules, like syntax checks for a specific language.
  *
@@ -23,6 +7,11 @@
  * @stable
  */
 abstract class ArcanistLinter {
+
+  const GRANULARITY_FILE = 1;
+  const GRANULARITY_DIRECTORY = 2;
+  const GRANULARITY_REPOSITORY = 3;
+  const GRANULARITY_GLOBAL = 4;
 
   protected $paths  = array();
   protected $data   = array();
@@ -33,10 +22,20 @@ abstract class ArcanistLinter {
   protected $stopAllLinters = false;
 
   private $customSeverityMap = array();
+  private $config = array();
 
   public function setCustomSeverityMap(array $map) {
     $this->customSeverityMap = $map;
     return $this;
+  }
+
+  public function setConfig(array $config) {
+    $this->config = $config;
+    return $this;
+  }
+
+  protected function getConfig($key, $default = null) {
+    return idx($this->config, $key, $default);
   }
 
   public function getActivePath() {
@@ -85,6 +84,10 @@ abstract class ArcanistLinter {
 
   protected function getEngine() {
     return $this->engine;
+  }
+
+  public function getCacheVersion() {
+    return 0;
   }
 
   public function getLintMessageFullCode($short_code) {
@@ -211,6 +214,10 @@ abstract class ArcanistLinter {
 
   public function getLintNameMap() {
     return array();
+  }
+
+  public function getCacheGranularity() {
+    return self::GRANULARITY_FILE;
   }
 
 }

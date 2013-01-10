@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Message emitted by a linter, like an error or warning.
  *
@@ -35,6 +19,7 @@ final class ArcanistLintMessage {
   protected $appliedToDisk;
   protected $dependentMessages = array();
   protected $obsolete;
+  protected $uncacheable;
 
   public static function newFromDictionary(array $dict) {
     $message = new ArcanistLintMessage();
@@ -53,6 +38,20 @@ final class ArcanistLintMessage {
       $message->setReplacementText($dict['replacement']);
     }
     return $message;
+  }
+
+  public function toDictionary() {
+    return array(
+      'path'        => $this->getPath(),
+      'line'        => $this->getLine(),
+      'char'        => $this->getChar(),
+      'code'        => $this->getCode(),
+      'severity'    => $this->getSeverity(),
+      'name'        => $this->getName(),
+      'description' => $this->getDescription(),
+      'original'    => $this->getOriginalText(),
+      'replacement' => $this->getReplacementText(),
+    );
   }
 
   public function setPath($path) {
@@ -179,6 +178,15 @@ final class ArcanistLintMessage {
 
   public function isPatchApplied() {
     return $this->appliedToDisk;
+  }
+
+  public function setUncacheable($bool) {
+    $this->uncacheable = $bool;
+    return $this;
+  }
+
+  public function isUncacheable() {
+    return $this->uncacheable;
   }
 
   public function setDependentMessages(array $messages) {

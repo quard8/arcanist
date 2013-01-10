@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2011 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Dumping ground for diff- and diff-algorithm-related miscellany.
  *
@@ -258,10 +242,10 @@ final class ArcanistDiffUtils {
 
     $m = array_fill(0, $ol + 1, array_fill(0, $nl + 1, array()));
 
-    $T_D = 'd';
-    $T_I = 'i';
-    $T_S = 's';
-    $T_X = 'x';
+    $t_d = 'd';
+    $t_i = 'i';
+    $t_s = 's';
+    $t_x = 'x';
 
     $m[0][0] = array(
       0,
@@ -270,13 +254,13 @@ final class ArcanistDiffUtils {
     for ($ii = 1; $ii <= $ol; $ii++) {
       $m[$ii][0] = array(
         $ii * 1000,
-        $T_D);
+        $t_d);
     }
 
     for ($jj = 1; $jj <= $nl; $jj++) {
       $m[0][$jj] = array(
         $jj * 1000,
-        $T_I);
+        $t_i);
     }
 
     $ii = 1;
@@ -285,10 +269,10 @@ final class ArcanistDiffUtils {
       do {
         if ($o[$ii - 1] == $n[$jj - 1]) {
           $sub_t_cost = $m[$ii - 1][$jj - 1][0] + 0;
-          $sub_t      = $T_S;
+          $sub_t      = $t_s;
         } else {
           $sub_t_cost = $m[$ii - 1][$jj - 1][0] + 2000;
-          $sub_t      = $T_X;
+          $sub_t      = $t_x;
         }
 
         if ($m[$ii - 1][$jj - 1][1] != $sub_t) {
@@ -296,12 +280,12 @@ final class ArcanistDiffUtils {
         }
 
         $del_t_cost = $m[$ii - 1][$jj][0] + 1000;
-        if ($m[$ii - 1][$jj][1] != $T_D) {
+        if ($m[$ii - 1][$jj][1] != $t_d) {
           $del_t_cost += 1;
         }
 
         $ins_t_cost = $m[$ii][$jj - 1][0] + 1000;
-        if ($m[$ii][$jj - 1][1] != $T_I) {
+        if ($m[$ii][$jj - 1][1] != $t_i) {
           $ins_t_cost += 1;
         }
 
@@ -312,11 +296,11 @@ final class ArcanistDiffUtils {
         } else if ($ins_t_cost <= $del_t_cost) {
           $m[$ii][$jj] = array(
             $ins_t_cost,
-            $T_I);
+            $t_i);
         } else {
           $m[$ii][$jj] = array(
             $del_t_cost,
-            $T_D);
+            $t_d);
         }
       } while ($jj++ < $nl);
     } while ($ii++ < $ol);
@@ -328,15 +312,15 @@ final class ArcanistDiffUtils {
       $r = $m[$ii][$jj][1];
       $result .= $r;
       switch ($r) {
-        case $T_S:
-        case $T_X:
+        case $t_s:
+        case $t_x:
           $ii--;
           $jj--;
           break;
-        case $T_I:
+        case $t_i:
           $jj--;
           break;
-        case $T_D:
+        case $t_d:
           $ii--;
           break;
       }

@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Applies changes from Differential or a file to the working copy.
  *
@@ -722,9 +706,24 @@ EOTEXT
       }
 
       if ($this->shouldCommit()) {
+        // git is really, really finicky about the author information so we
+        // make sure it is in the
+        // "George Washington <gwashington@example.com> format or don't use it.
+        $author_cmd = '';
+        $author = $bundle->getAuthor();
+        if ($author) {
+          $address = new PhutilEmailAddress($author);
+          if ($address->getDisplayName() && $address->getAddress()) {
+            $author = sprintf('%s <%s>',
+                              $address->getDisplayName(),
+                              $address->getAddress());
+            $author_cmd = csprintf('--author=%s ', $author);
+          }
+        }
         $commit_message = $this->getCommitMessage($bundle);
         $future = $repository_api->execFutureLocal(
-          'commit -a -F -');
+          'commit -a %C-F -',
+          $author_cmd);
         $future->write($commit_message);
         $future->resolvex();
         $verb = 'committed';
@@ -774,9 +773,15 @@ EOTEXT
       }
 
       if ($this->shouldCommit()) {
+        $author_cmd = '';
+        $author = $bundle->getAuthor();
+        if ($author) {
+          $author_cmd = sprintf('-u %s ', $author);
+        }
         $commit_message = $this->getCommitMessage($bundle);
         $future = $repository_api->execFutureLocal(
-          'commit -A -l -');
+          'commit -A %C-l -',
+          $author_cmd);
         $future->write($commit_message);
         $future->resolvex();
         $verb = 'committed';
@@ -848,10 +853,6 @@ EOTEXT
   private function sanityCheck(ArcanistBundle $bundle) {
     $repository_api = $this->getRepositoryAPI();
 
-    if ($repository_api->supportsRelativeLocalCommits()) {
-      $repository_api->setDefaultBaseCommit();
-    }
-
     // Require clean working copy
     $this->requireCleanWorkingCopy();
 
@@ -884,7 +885,7 @@ EOTEXT
 
     // Check to see if the bundle's base revision matches the working copy
     // base revision
-    if ($repository_api->supportsRelativeLocalCommits()) {
+    if ($repository_api->supportsLocalCommits()) {
       $bundle_base_rev = $bundle->getBaseRevision();
       if (empty($bundle_base_rev)) {
         // this means $source is SOURCE_PATCH || SOURCE_BUNDLE w/ $version < 2

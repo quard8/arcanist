@@ -1,21 +1,5 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Sends changes from your working copy to Differential for code review.
  *
@@ -146,6 +130,7 @@ EOTEXT
           'less-context'        => null,
           'apply-patches'       => '--raw disables lint.',
           'never-apply-patches' => '--raw disables lint.',
+          'advice'              => '--raw disables lint.',
           'lintall'             => '--raw disables lint.',
 
           'create'              => '--raw and --create both need stdin. '.
@@ -165,6 +150,7 @@ EOTEXT
           'less-context'        => null,
           'apply-patches'       => '--raw-command disables lint.',
           'never-apply-patches' => '--raw-command disables lint.',
+          'advice'              => '--raw-command disables lint.',
           'lintall'             => '--raw-command disables lint.',
         ),
       ),
@@ -190,6 +176,7 @@ EOTEXT
           "Do not run lint.",
         'conflicts' => array(
           'lintall'   => '--nolint suppresses lint.',
+          'advice'    => '--nolint suppresses lint.',
           'apply-patches' => '--nolint suppresses lint.',
           'never-apply-patches' => '--nolint suppresses lint.',
         ),
@@ -203,6 +190,7 @@ EOTEXT
           'message'   => '--only does not affect revisions.',
           'edit'      => '--only does not affect revisions.',
           'lintall'   => '--only suppresses lint.',
+          'advice'    => '--only suppresses lint.',
           'apply-patches' => '--only suppresses lint.',
           'never-apply-patches' => '--only suppresses lint.',
         ),
@@ -216,6 +204,14 @@ EOTEXT
           'only'      => null,
           'edit'      => '--preview does affect revisions.',
           'message'   => '--preview does not update any revision.',
+        ),
+      ),
+      'plan-changes' => array(
+        'help' =>
+          "Create or update a revision without requesting a code review.",
+        'conflicts' => array(
+          'only'     => '--only does not affect revisions.',
+          'preview'  => '--preview does not affect revisions.',
         ),
       ),
       'encoding' => array(
@@ -243,6 +239,19 @@ EOTEXT
       'lintall' => array(
         'help' =>
           "Raise all lint warnings, not just those on lines you changed.",
+        'passthru' => array(
+          'lint' => true,
+        ),
+      ),
+      'advice' => array(
+        'help' =>
+          "Require excuse for lint advice in addition to lint warnings and ".
+          "errors.",
+      ),
+      'only-new' => array(
+        'param' => 'bool',
+        'help' =>
+          'Display only lint messages not present in the original code.',
         'passthru' => array(
           'lint' => true,
         ),
@@ -283,12 +292,17 @@ EOTEXT
           'lint' => true,
         ),
       ),
+      'add-all' => array(
+        'help' =>
+          'Automatically add all untracked, unstaged and uncommitted files to '.
+          'the commit.',
+      ),
       'json' => array(
         'help' =>
           'Emit machine-readable JSON. EXPERIMENTAL! Probably does not work!',
       ),
       'no-amend' => array(
-        'help' => 'Never amend commits in the working copy.',
+        'help' => 'Never amend commits in the working copy with lint patches.',
       ),
       'uncommitted' => array(
         'help' => 'Suppress warning about uncommitted changes.',
@@ -356,6 +370,13 @@ EOTEXT
           'Run lint and unit tests on background. '.
           '"0" to disable, "1" to enable (default).',
       ),
+      'cache' => array(
+        'param' => 'bool',
+        'help' => "0 to disable lint cache, 1 to enable (default).",
+        'passthru' => array(
+          'lint' => true,
+        ),
+      ),
       '*' => 'paths',
     );
 
@@ -407,7 +428,9 @@ EOTEXT
 
     $this->dispatchEvent(
       ArcanistEventType::TYPE_DIFF_DIDBUILDMESSAGE,
-      array());
+      array(
+        'message' => $commit_message,
+      ));
 
     if (!$this->shouldOnlyCreateDiff()) {
       $revision = $this->buildRevisionFromCommitMessage($commit_message);
@@ -434,6 +457,18 @@ EOTEXT
     $this->postponedLinters = $data['postponedLinters'];
     $unit_result = $data['unitResult'];
     $this->testResults = $data['testResults'];
+
+    if ($this->getArgument('nolint')) {
+      $this->excuses['lint'] = $this->getSkipExcuse(
+        'Provide explanation for skipping lint or press Enter to abort:',
+        'lint-excuses');
+    }
+
+    if ($this->getArgument('nounit')) {
+      $this->excuses['unit'] = $this->getSkipExcuse(
+        'Provide explanation for skipping unit tests or press Enter to abort:',
+        'unit-excuses');
+    }
 
     $changes = $this->generateChanges();
     if (!$changes) {
@@ -485,14 +520,12 @@ EOTEXT
         ob_start();
       }
     } else {
-
       $revision['diffid'] = $this->getDiffID();
 
       if ($commit_message->getRevisionID()) {
-        $future = $conduit->callMethod(
+        $result = $conduit->callMethodSynchronous(
           'differential.updaterevision',
           $revision);
-        $result = $future->resolve();
 
         foreach (array('edit-messages.json', 'update-messages.json') as $file) {
           $messages = $this->readScratchJSONFile($file);
@@ -502,8 +535,6 @@ EOTEXT
 
         echo "Updated an existing Differential revision:\n";
       } else {
-        $revision['user'] = $this->getUserPHID();
-
         $revision = $this->dispatchWillCreateRevisionEvent($revision);
 
         $result = $conduit->callMethodSynchronous(
@@ -534,6 +565,16 @@ EOTEXT
       echo phutil_console_format(
         "        **Revision URI:** __%s__\n\n",
         $uri);
+
+      if ($this->getArgument('plan-changes')) {
+        $conduit->callMethodSynchronous(
+          'differential.createcomment',
+          array(
+            'revision_id' => $result['revisionid'],
+            'action' => 'rethink',
+          ));
+        echo "Planned changes to the revision.\n";
+      }
     }
 
     echo "Included changes:\n";
@@ -563,16 +604,8 @@ EOTEXT
     $repository_api->setBaseCommitArgumentRules(
       $this->getArgument('base', ''));
 
-    if ($repository_api->supportsRelativeLocalCommits()) {
-
-      // Parse the relative commit as soon as we can, to avoid generating
-      // caches we need to drop later and expensive discovery operations
-      // (particularly in Mercurial).
-
-      $relative = $this->getArgument('paths');
-      if ($relative) {
-        $repository_api->parseRelativeLocalCommit($relative);
-      }
+    if ($repository_api->supportsCommitRanges()) {
+      $this->parseBaseCommitArgument($this->getArgument('paths'));
     }
   }
 
@@ -585,10 +618,20 @@ EOTEXT
     }
 
     if ($this->requiresWorkingCopy()) {
+      $repository_api = $this->getRepositoryAPI();
       try {
+        if ($this->getArgument('add-all')) {
+          $this->setCommitMode(self::COMMIT_ENABLE);
+        } else if ($this->getArgument('uncommitted')) {
+          $this->setCommitMode(self::COMMIT_DISABLE);
+        } else {
+          $this->setCommitMode(self::COMMIT_ALLOW);
+        }
+        if ($repository_api instanceof ArcanistSubversionAPI) {
+          $repository_api->limitStatusToPaths($this->getArgument('paths'));
+        }
         $this->requireCleanWorkingCopy();
       } catch (ArcanistUncommittedChangesException $ex) {
-        $repository_api = $this->getRepositoryAPI();
         if ($repository_api instanceof ArcanistMercurialAPI) {
 
           // Some Mercurial users prefer to use it like SVN, where they don't
@@ -772,10 +815,8 @@ EOTEXT
         }
       }
 
-    } else if ($repository_api->supportsRelativeLocalCommits()) {
-      $paths = $repository_api->getWorkingCopyStatus();
     } else {
-      throw new Exception("Unknown VCS!");
+      $paths = $repository_api->getWorkingCopyStatus();
     }
 
     foreach ($paths as $path => $mask) {
@@ -1226,9 +1267,9 @@ EOTEXT
     $this->console->writeOut("Linting...\n");
     try {
       $argv = $this->getPassthruArgumentsAsArgv('lint');
-      if ($repository_api->supportsRelativeLocalCommits()) {
+      if ($repository_api->supportsCommitRanges()) {
         $argv[] = '--rev';
-        $argv[] = $repository_api->getRelativeCommit();
+        $argv[] = $repository_api->getBaseCommit();
       }
 
       $lint_workflow = $this->buildChildWorkflow('lint', $argv);
@@ -1242,8 +1283,16 @@ EOTEXT
 
       switch ($lint_result) {
         case ArcanistLintWorkflow::RESULT_OKAY:
-          $this->console->writeOut(
-            "<bg:green>** LINT OKAY **</bg> No lint problems.\n");
+          if ($this->getArgument('advice') &&
+              $lint_workflow->getUnresolvedMessages()) {
+            $this->getErrorExcuse(
+              'lint',
+              "Lint issued unresolved advice.",
+              'lint-excuses');
+          } else {
+            $this->console->writeOut(
+              "<bg:green>** LINT OKAY **</bg> No lint problems.\n");
+          }
           break;
         case ArcanistLintWorkflow::RESULT_WARNINGS:
           $this->getErrorExcuse(
@@ -1268,15 +1317,7 @@ EOTEXT
 
       $this->unresolvedLint = array();
       foreach ($lint_workflow->getUnresolvedMessages() as $message) {
-        $this->unresolvedLint[] = array(
-          'path'        => $message->getPath(),
-          'line'        => $message->getLine(),
-          'char'        => $message->getChar(),
-          'code'        => $message->getCode(),
-          'severity'    => $message->getSeverity(),
-          'name'        => $message->getName(),
-          'description' => $message->getDescription(),
-        );
+        $this->unresolvedLint[] = $message->toDictionary();
       }
 
       $this->postponedLinters = $lint_workflow->getPostponedLinters();
@@ -1307,9 +1348,9 @@ EOTEXT
     $this->console->writeOut("Running unit tests...\n");
     try {
       $argv = $this->getPassthruArgumentsAsArgv('unit');
-      if ($repository_api->supportsRelativeLocalCommits()) {
+      if ($repository_api->supportsCommitRanges()) {
         $argv[] = '--rev';
-        $argv[] = $repository_api->getRelativeCommit();
+        $argv[] = $repository_api->getBaseCommit();
       }
       $unit_workflow = $this->buildChildWorkflow('unit', $argv);
       $unit_result = $unit_workflow->run();
@@ -1368,6 +1409,20 @@ EOTEXT
 
   public function getTestResults() {
     return $this->testResults;
+  }
+
+  private function getSkipExcuse($prompt, $history) {
+    $excuse = $this->getArgument('excuse');
+
+    if ($excuse === null) {
+      $history = $this->getRepositoryAPI()->getScratchFilePath($history);
+      $excuse = phutil_console_prompt($prompt, $history);
+      if ($excuse == '') {
+        throw new ArcanistUserAbortException();
+      }
+    }
+
+    return $excuse;
   }
 
   private function getErrorExcuse($type, $prompt, $history) {
@@ -1555,6 +1610,7 @@ EOTEXT
           ));
       }
     }
+    $old_message = $template;
 
     $included = array();
     if ($included_commits) {
@@ -1616,11 +1672,18 @@ EOTEXT
       $template = ArcanistCommentRemover::removeComments($new_template);
 
       $repository_api = $this->getRepositoryAPI();
-      $should_amend = (count($included_commits) == 1 && $this->shouldAmend());
-      if ($should_amend && $repository_api->supportsAmend()) {
-        $repository_api->amendCommit($template);
-        $wrote = true;
-        $where = 'commit message';
+      // special check for whether to amend here. optimizes a common git
+      // workflow. we can't do this for mercurial because the mq extension
+      // is popular and incompatible with hg commit --amend ; see T2011.
+      $should_amend = (count($included_commits) == 1 &&
+                       $repository_api instanceof ArcanistGitAPI &&
+                       $this->shouldAmend());
+      if ($should_amend) {
+        $wrote = (rtrim($old_message) != rtrim($template));
+        if ($wrote) {
+          $repository_api->amendCommit($template);
+          $where = 'commit message';
+        }
       } else {
         $wrote = $this->writeScratchFile('create-message', $template);
         $where = "'".$this->getReadableScratchFilePath('create-message')."'";
@@ -1897,6 +1960,9 @@ EOTEXT
     $messages = array();
     foreach ($local as $hash => $info) {
       $text = $info['message'];
+      if (trim($text) == self::AUTO_COMMIT_TITLE) {
+        continue;
+      }
       $obj = ArcanistDifferentialCommitMessage::newFromRawCorpus($text);
       $messages[$hash] = $obj;
     }
@@ -2127,6 +2193,9 @@ EOTEXT
     foreach ($usable as $message) {
       // Pick the first line out of each message.
       $text = trim($message);
+      if ($text == self::AUTO_COMMIT_TITLE) {
+        continue;
+      }
       $text = head(explode("\n", $text));
       $default[] = '  - '.$text."\n";
     }
@@ -2266,13 +2335,13 @@ EOTEXT
    * @task diffprop
    */
   private function updateLintDiffProperty() {
+    if (strlen($this->excuses['lint'])) {
+      $this->updateDiffProperty('arc:lint-excuse',
+        json_encode($this->excuses['lint']));
+    }
 
     if ($this->unresolvedLint) {
       $this->updateDiffProperty('arc:lint', json_encode($this->unresolvedLint));
-      if (strlen($this->excuses['lint'])) {
-        $this->updateDiffProperty('arc:lint-excuse',
-          json_encode($this->excuses['lint']));
-      }
     }
 
     $postponed = $this->postponedLinters;
@@ -2291,14 +2360,13 @@ EOTEXT
    * @task diffprop
    */
   private function updateUnitDiffProperty() {
-    if (!$this->testResults) {
-      return;
-    }
-
-    $this->updateDiffProperty('arc:unit', json_encode($this->testResults));
     if (strlen($this->excuses['unit'])) {
       $this->updateDiffProperty('arc:unit-excuse',
         json_encode($this->excuses['unit']));
+    }
+
+    if ($this->testResults) {
+      $this->updateDiffProperty('arc:unit', json_encode($this->testResults));
     }
   }
 

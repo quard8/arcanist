@@ -1,30 +1,14 @@
 <?php
 
-/*
- * Copyright 2012 Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 /**
  * Manages lint execution. When you run 'arc lint' or 'arc diff', Arcanist
  * checks your .arcconfig to see if you have specified a lint engine in the
- * key "lint_engine". The engine must extend this class. For example:
+ * key "lint.engine". The engine must extend this class. For example:
  *
  *  lang=js
  *  {
  *    // ...
- *    "lint_engine" : "ExampleLintEngine",
+ *    "lint.engine" : "ExampleLintEngine",
  *    // ...
  *  }
  *
@@ -61,10 +45,13 @@
 abstract class ArcanistLintEngine {
 
   protected $workingCopy;
+  protected $paths = array();
   protected $fileData = array();
 
   protected $charToLine = array();
   protected $lineToFirstChar = array();
+  private $cachedResults;
+  private $cacheVersion;
   private $results = array();
   private $minimumSeverity = ArcanistLintSeverity::SEVERITY_DISABLED;
 
@@ -177,7 +164,6 @@ abstract class ArcanistLintEngine {
   }
 
   public function run() {
-    $stopped = array();
     $linters = $this->buildLinters();
 
     if (!$linters) {
@@ -196,33 +182,52 @@ abstract class ArcanistLintEngine {
       throw new ArcanistNoEffectException("No paths are lintable.");
     }
 
-    $exceptions = array();
-    foreach ($linters as $linter_name => $linter) {
-      try {
-        $linter->setEngine($this);
-        if (!$linter->canRun()) {
-          continue;
-        }
-        $paths = $linter->getPaths();
+    $versions = array($this->getCacheVersion());
+    foreach ($linters as $linter) {
+      $versions[] = get_class($linter).':'.$linter->getCacheVersion();
+    }
+    $this->cacheVersion = crc32(implode("\n", $versions));
 
-        foreach ($paths as $key => $path) {
-          // Make sure each path has a result generated, even if it is empty
-          // (i.e., the file has no lint messages).
-          $result = $this->getResultForPath($path);
-          if (isset($stopped[$path])) {
+    $linters_paths = array();
+    foreach ($linters as $linter_name => $linter) {
+      $linter->setEngine($this);
+      if (!$linter->canRun()) {
+        continue;
+      }
+      $paths = $linter->getPaths();
+
+      $cache_granularity = $linter->getCacheGranularity();
+
+      foreach ($paths as $key => $path) {
+        // Make sure each path has a result generated, even if it is empty
+        // (i.e., the file has no lint messages).
+        $result = $this->getResultForPath($path);
+        if (isset($this->cachedResults[$path][$this->cacheVersion])) {
+          if ($cache_granularity == ArcanistLinter::GRANULARITY_FILE) {
             unset($paths[$key]);
           }
         }
-        $paths = array_values($paths);
+      }
+      $paths = array_values($paths);
+      $linters_paths[$linter_name] = $paths;
 
-        if ($paths) {
-          $linter->willLintPaths($paths);
-          foreach ($paths as $path) {
-            $linter->willLintPath($path);
-            $linter->lintPath($path);
-            if ($linter->didStopAllLinters()) {
-              $stopped[$path] = true;
-            }
+      if ($paths) {
+        $linter->willLintPaths($paths);
+      }
+    }
+
+    $stopped = array();
+    $exceptions = array();
+    foreach ($linters as $linter_name => $linter) {
+      try {
+        foreach ($linters_paths[$linter_name] as $path) {
+          if (isset($stopped[$path])) {
+            continue;
+          }
+          $linter->willLintPath($path);
+          $linter->lintPath($path);
+          if ($linter->didStopAllLinters()) {
+            $stopped[$path] = true;
           }
         }
 
@@ -234,6 +239,9 @@ abstract class ArcanistLintEngine {
           if (!$this->isRelevantMessage($message)) {
             continue;
           }
+          if ($cache_granularity != ArcanistLinter::GRANULARITY_FILE) {
+            $message->setUncacheable(true);
+          }
           $result = $this->getResultForPath($message->getPath());
           $result->addMessage($message);
         }
@@ -242,6 +250,15 @@ abstract class ArcanistLintEngine {
           $linter_name = get_class($linter);
         }
         $exceptions[$linter_name] = $ex;
+      }
+    }
+
+    if ($this->cachedResults) {
+      foreach ($this->cachedResults as $path => $messages) {
+        foreach (idx($messages, $this->cacheVersion, array()) as $message) {
+          $this->getResultForPath($path)->addMessage(
+            ArcanistLintMessage::newFromDictionary($message));
+        }
       }
     }
 
@@ -271,6 +288,15 @@ abstract class ArcanistLintEngine {
     }
 
     return $this->results;
+  }
+
+  /**
+   * @param dict<string path, dict<int version, list<dict message>>>
+   * @return this
+   */
+  public function setCachedResults(array $results) {
+    $this->cachedResults = $results;
+    return $this;
   }
 
   public function getResults() {
@@ -306,10 +332,11 @@ abstract class ArcanistLintEngine {
     return false;
   }
 
-  private function getResultForPath($path) {
+  protected function getResultForPath($path) {
     if (empty($this->results[$path])) {
       $result = new ArcanistLintResult();
       $result->setPath($path);
+      $result->setCacheVersion($this->cacheVersion);
       $this->results[$path] = $result;
     }
     return $this->results[$path];
@@ -349,6 +376,19 @@ abstract class ArcanistLintEngine {
   public function setPostponedLinters(array $linters) {
     $this->postponedLinters = $linters;
     return $this;
+  }
+
+  protected function getCacheVersion() {
+    return 0;
+  }
+
+  protected function getPEP8WithTextOptions() {
+    // E101 is subset of TXT2 (Tab Literal).
+    // E501 is same as TXT3 (Line Too Long).
+    // W291 is same as TXT6 (Trailing Whitespace).
+    // W292 is same as TXT4 (File Does Not End in Newline).
+    // W293 is same as TXT6 (Trailing Whitespace).
+    return '--ignore=E101,E501,W291,W292,W293';
   }
 
 }
