@@ -20,6 +20,7 @@ abstract class ArcanistPhutilTestCase {
   private $coverage = array();
   private $projectRoot;
   private $paths;
+  private $renderer;
 
 
 /* -(  Making Test Assertions  )--------------------------------------------- */
@@ -51,8 +52,12 @@ abstract class ArcanistPhutilTestCase {
     $expect = PhutilReadableSerializer::printableValue($expect);
     $result = PhutilReadableSerializer::printableValue($result);
 
-    $where = debug_backtrace();
-    $where = array_shift($where);
+    foreach (debug_backtrace() as $location) {
+      if (!preg_match('/^assert[A-Z]/', idx($location, 'function'))) {
+        break;
+      }
+      $where = $location;
+    }
 
     $line = idx($where, 'line');
     $file = basename(idx($where, 'file'));
@@ -67,7 +72,7 @@ abstract class ArcanistPhutilTestCase {
 
     if (strpos($expect, "\n") === false && strpos($result, "\n") === false) {
       $output .= "Expected: {$expect}\n";
-      $output .= "Actual: {$result}";
+      $output .= "  Actual: {$result}";
     } else {
       $output .= "Expected vs Actual Output Diff\n";
       $output .= ArcanistDiffUtils::renderDifferences(
@@ -127,8 +132,7 @@ abstract class ArcanistPhutilTestCase {
       array('assertException' => array()),
       array(false),
       $callable,
-      $expected_exception_class
-    );
+      $expected_exception_class);
   }
 
   /**
@@ -252,7 +256,7 @@ abstract class ArcanistPhutilTestCase {
     $callable,
     $exception_class = 'Exception') {
     return $this->tryTestCases(
-      array_combine(array_keys($map), array_keys($map)),
+      array_fuse(array_keys($map)),
       array_values($map),
       $callable,
       $exception_class);
@@ -306,6 +310,31 @@ abstract class ArcanistPhutilTestCase {
    * @task hook
    */
   protected function didRunOneTest($test_method_name) {
+    return;
+  }
+
+
+  /**
+   * This hook is invoked once, before any test cases execute. It gives you
+   * an opportunity to perform setup steps for the entire suite of test cases.
+   *
+   * @param list<ArcanistPhutilTestCase> List of test cases to be run.
+   * @return void
+   * @task hook
+   */
+  public function willRunTestCases(array $test_cases) {
+    return;
+  }
+
+
+  /**
+   * This hook is invoked once, after all test cases execute.
+   *
+   * @param list<ArcanistPhutilTestCase> List of test cases that ran.
+   * @return void
+   * @task hook
+   */
+  public function didRunTestCases(array $test_cases) {
     return;
   }
 
@@ -373,6 +402,10 @@ abstract class ArcanistPhutilTestCase {
     $result->setDuration(microtime(true) - $this->testStartTime);
     $result->setUserData($reason);
     $this->results[] = $result;
+
+    if ($this->renderer) {
+      echo $this->renderer->renderUnitResult($result);
+    }
   }
 
 
@@ -504,8 +537,12 @@ abstract class ArcanistPhutilTestCase {
       $coverage[substr($file, strlen($this->projectRoot) + 1)] = $str;
     }
 
-    // Only keep coverage information for files modified by the change.
-    $coverage = array_select_keys($coverage, $this->paths);
+    // Only keep coverage information for files modified by the change. In
+    // the case of --everything, we won't have paths, so just return all the
+    // coverage data.
+    if ($this->paths) {
+      $coverage = array_select_keys($coverage, $this->paths);
+    }
 
     return $coverage;
   }
@@ -529,6 +566,11 @@ abstract class ArcanistPhutilTestCase {
 
   protected function getLink($method) {
     return null;
+  }
+
+  public function setRenderer(ArcanistUnitRenderer $renderer) {
+    $this->renderer = $renderer;
+    return $this;
   }
 
 }

@@ -60,11 +60,14 @@ abstract class ArcanistBaseWorkflow extends Phobject {
   private $passedArguments;
   private $command;
 
+  private $stashed;
+
   private $projectInfo;
 
   private $arcanistConfiguration;
   private $parentWorkflow;
   private $workingDirectory;
+  private $repositoryVersion;
 
   private $changeCache = array();
 
@@ -75,6 +78,14 @@ abstract class ArcanistBaseWorkflow extends Phobject {
 
 
   abstract public function run();
+
+  /**
+   * Finalizes any cleanup operations that need to occur regardless of
+   * whether the command succeeded or failed.
+   */
+  public function finalize() {
+    $this->finalizeWorkingCopy();
+  }
 
   /**
    * Return the command used to invoke this workflow from the command like,
@@ -491,7 +502,9 @@ abstract class ArcanistBaseWorkflow extends Phobject {
   }
 
 
-  public function setArcanistConfiguration($arcanist_configuration) {
+  public function setArcanistConfiguration(
+    ArcanistConfiguration $arcanist_configuration) {
+
     $this->arcanistConfiguration = $arcanist_configuration;
     return $this;
   }
@@ -633,8 +646,20 @@ abstract class ArcanistBaseWorkflow extends Phobject {
       } else if (!strncmp($arg, '--', 2)) {
         $arg_key = substr($arg, 2);
         if (!array_key_exists($arg_key, $spec)) {
-          throw new ArcanistUsageException(
-            "Unknown argument '{$arg_key}'. Try 'arc help'.");
+          $corrected = ArcanistConfiguration::correctArgumentSpelling(
+            $arg_key,
+            array_keys($spec));
+          if (count($corrected) == 1) {
+            PhutilConsole::getConsole()->writeErr(
+              pht(
+                "(Assuming '%s' is the British spelling of '%s'.)",
+                '--'.$arg_key,
+                '--'.head($corrected))."\n");
+            $arg_key = head($corrected);
+          } else {
+            throw new ArcanistUsageException(
+              "Unknown argument '{$arg_key}'. Try 'arc help'.");
+          }
         }
       } else if (!strncmp($arg, '-', 1)) {
         $arg_key = substr($arg, 1);
@@ -746,6 +771,14 @@ abstract class ArcanistBaseWorkflow extends Phobject {
     return $this;
   }
 
+  public function finalizeWorkingCopy() {
+    if ($this->stashed) {
+      $api = $this->getRepositoryAPI();
+      $api->unstashChanges();
+      echo "Restored stashed changes to the working directory.\n";
+    }
+  }
+
   public function requireCleanWorkingCopy() {
     $api = $this->getRepositoryAPI();
 
@@ -768,15 +801,15 @@ abstract class ArcanistBaseWorkflow extends Phobject {
           echo phutil_console_wrap(
             "Since you don't have '.gitignore' rules for these files and have ".
             "not listed them in '.git/info/exclude', you may have forgotten ".
-            "to 'git add' them to your commit.");
+            "to 'git add' them to your commit.\n");
         } else if ($api instanceof ArcanistSubversionAPI) {
           echo phutil_console_wrap(
             "Since you don't have 'svn:ignore' rules for these files, you may ".
-            "have forgotten to 'svn add' them.");
+            "have forgotten to 'svn add' them.\n");
         } else if ($api instanceof ArcanistMercurialAPI) {
           echo phutil_console_wrap(
             "Since you don't have '.hgignore' rules for these files, you ".
-            "may have forgotten to 'hg add' them to your commit.");
+            "may have forgotten to 'hg add' them to your commit.\n");
         }
 
         if ($this->askForAdd()) {
@@ -818,13 +851,23 @@ abstract class ArcanistBaseWorkflow extends Phobject {
       echo "You have unstaged changes in this working copy.\n\n".
         $working_copy_desc.
         "  Unstaged changes in working copy:\n".
-        "    ".implode("\n    ", $unstaged);
+        "    ".implode("\n    ", $unstaged)."\n";
       if ($this->askForAdd()) {
         $api->addToCommit($unstaged);
         $must_commit += array_flip($unstaged);
       } else {
-        throw new ArcanistUsageException(
-          "Stage and commit (or revert) them before proceeding.");
+        $permit_autostash = $this->getWorkingCopy()->getConfigFromAnySource(
+          'arc.autostash',
+          false);
+        if ($permit_autostash && $api->canStashChanges()) {
+          echo "Stashing uncommitted changes. (You can restore them with ".
+               "`git stash pop`.)\n";
+          $api->stashChanges();
+          $this->stashed = true;
+        } else {
+          throw new ArcanistUsageException(
+            "Stage and commit (or revert) them before proceeding.");
+        }
       }
     }
 
@@ -838,7 +881,7 @@ abstract class ArcanistBaseWorkflow extends Phobject {
       echo "You have uncommitted changes in this working copy.\n\n".
         $working_copy_desc.
         "  Uncommitted changes in working copy:\n".
-        "    ".implode("\n    ", $uncommitted);
+        "    ".implode("\n    ", $uncommitted)."\n";
       if ($this->askForAdd()) {
         $must_commit += array_flip($uncommitted);
       } else {
@@ -868,15 +911,20 @@ abstract class ArcanistBaseWorkflow extends Phobject {
     if (!$commits) {
       return false;
     }
-    $commit = reset($commits);
 
+    $commit = reset($commits);
     $message = ArcanistDifferentialCommitMessage::newFromRawCorpus(
       $commit['message']);
+
     if ($message->getGitSVNBaseRevision()) {
       return false;
     }
 
     if ($api->getAuthor() != $commit['author']) {
+      return false;
+    }
+
+    if ($message->getRevisionID() && $this->getArgument('create')) {
       return false;
     }
 
@@ -913,11 +961,12 @@ abstract class ArcanistBaseWorkflow extends Phobject {
   private function askForAdd() {
     if ($this->commitMode == self::COMMIT_DISABLE) {
       return false;
-    } else if ($this->commitMode == self::COMMIT_ENABLE) {
-      return true;
     }
     if ($this->shouldAmend === null) {
       $this->shouldAmend = $this->shouldAmend();
+    }
+    if ($this->commitMode == self::COMMIT_ENABLE) {
+      return true;
     }
     if ($this->shouldAmend) {
       $prompt = "Do you want to amend these files to the commit?";
@@ -967,7 +1016,8 @@ abstract class ArcanistBaseWorkflow extends Phobject {
     $bundle->setProjectID(idx($diff, 'projectName'));
     $bundle->setBaseRevision(idx($diff, 'sourceControlBaseRevision'));
     $bundle->setRevisionID(idx($diff, 'revisionID'));
-    $bundle->setAuthor(idx($diff, 'author'));
+    $bundle->setAuthorName(idx($diff, 'authorName'));
+    $bundle->setAuthorEmail(idx($diff, 'authorEmail'));
     return $bundle;
   }
 
@@ -1015,7 +1065,7 @@ abstract class ArcanistBaseWorkflow extends Phobject {
       // operation, so special case it.
       if (empty($this->changeCache[$path])) {
         $diff = $repository_api->getRawDiffText($path);
-        $parser = new ArcanistDiffParser();
+        $parser = $this->newDiffParser();
         $changes = $parser->parseDiff($diff);
         if (count($changes) != 1) {
           throw new Exception("Expected exactly one change.");
@@ -1115,11 +1165,9 @@ abstract class ArcanistBaseWorkflow extends Phobject {
 
   public static function getSystemArcConfigLocation() {
     if (phutil_is_windows()) {
-      // this is a horrible place to put this, but there doesn't seem to be a
-      // non-horrible place on Windows
       return Filesystem::resolvePath(
         'Phabricator/Arcanist/config',
-        getenv('PROGRAMFILES'));
+        getenv('ProgramData'));
     } else {
       return '/etc/arcconfig';
     }
@@ -1541,6 +1589,21 @@ abstract class ArcanistBaseWorkflow extends Phobject {
     $api->setBaseCommit(head($argv));
 
     return $this;
+  }
+
+  protected function getRepositoryVersion() {
+    if (!$this->repositoryVersion) {
+      $api = $this->getRepositoryAPI();
+      $commit = $api->getSourceControlBaseRevision();
+      $versions = array('' => $commit);
+      foreach ($api->getChangedFiles($commit) as $path => $mask) {
+        $versions[$path] = (Filesystem::pathExists($path)
+          ? md5_file($path)
+          : '');
+      }
+      $this->repositoryVersion = md5(json_encode($versions));
+    }
+    return $this->repositoryVersion;
   }
 
 }

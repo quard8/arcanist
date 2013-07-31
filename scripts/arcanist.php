@@ -19,6 +19,9 @@ $args->parsePartial(
       'repeat'  => true,
     ),
     array(
+      'name'    => 'skip-arcconfig',
+    ),
+    array(
       'name'    => 'conduit-uri',
       'param'   => 'uri',
       'help'    => 'Connect to Phabricator install specified by __uri__.',
@@ -40,6 +43,7 @@ $config_trace_mode = $args->getArg('trace');
 $force_conduit = $args->getArg('conduit-uri');
 $force_conduit_version = $args->getArg('conduit-version');
 $conduit_timeout = $args->getArg('conduit-timeout');
+$skip_arcconfig = $args->getArg('skip-arcconfig');
 $load = $args->getArg('load-phutil-library');
 $help = $args->getArg('help');
 
@@ -72,7 +76,12 @@ try {
 
   $global_config = ArcanistBaseWorkflow::readGlobalArcConfig();
   $system_config = ArcanistBaseWorkflow::readSystemArcConfig();
-  $working_copy = ArcanistWorkingCopyIdentity::newFromPath($working_directory);
+  if ($skip_arcconfig) {
+    $working_copy = ArcanistWorkingCopyIdentity::newDummyWorkingCopy();
+  } else {
+    $working_copy =
+      ArcanistWorkingCopyIdentity::newFromPath($working_directory);
+  }
 
   reenter_if_this_is_arcanist_or_libphutil(
     $console,
@@ -87,6 +96,9 @@ try {
   // is configured. This is basically a debugging feature to let you force
   // specific libraries to load regardless of the state of the world.
   if ($load) {
+    $console->writeLog(
+      "Using '--load-phutil-library' flag, configuration will be ignored ".
+      "and configured libraries will not be loaded."."\n");
     // Load the flag libraries. These must load, since the user specified them
     // explicitly.
     arcanist_load_libraries(
@@ -221,12 +233,17 @@ try {
 
   if ($need_auth) {
     if (!$user_name || !$certificate) {
+      $arc = 'arc';
+      if ($force_conduit) {
+        $arc .= csprintf(' --conduit-uri=%s', $conduit_uri);
+      }
+
       throw new ArcanistUsageException(
         phutil_console_format(
           "YOU NEED TO __INSTALL A CERTIFICATE__ TO LOGIN TO PHABRICATOR\n\n".
           "You are trying to connect to '{$conduit_uri}' but do not have ".
           "a certificate installed for this host. Run:\n\n".
-          "      $ **arc install-certificate**\n\n".
+          "      $ **{$arc} install-certificate**\n\n".
           "...to install one."));
     }
     $workflow->authenticateConduit();
@@ -259,9 +276,18 @@ try {
 
   $config->willRunWorkflow($command, $workflow);
   $workflow->willRunWorkflow();
-  $err = $workflow->run();
-  $config->didRunWorkflow($command, $workflow, $err);
+  try {
+    $err = $workflow->run();
+    $config->didRunWorkflow($command, $workflow, $err);
+  } catch (Exception $e) {
+    $workflow->finalize();
+    throw $e;
+  }
+  $workflow->finalize();
   exit((int)$err);
+
+} catch (ArcanistNoEffectException $ex) {
+  echo $ex->getMessage()."\n";
 
 } catch (Exception $ex) {
   $is_usage = ($ex instanceof ArcanistUsageException);
@@ -543,12 +569,17 @@ function reenter_if_this_is_arcanist_or_libphutil(
     $libphutil_path = dirname(phutil_get_library_root('phutil'));
   }
 
-  $err = phutil_passthru(
-    phutil_is_windows()
-      ? 'set ARC_PHUTIL_PATH=%s & %Ls'
-      : 'ARC_PHUTIL_PATH=%s %Ls',
-    $libphutil_path,
-    $original_argv);
+  if (phutil_is_windows()) {
+    $err = phutil_passthru(
+      'set ARC_PHUTIL_PATH=%s & %Ls',
+      $libphutil_path,
+      $original_argv);
+  } else {
+    $err = phutil_passthru(
+      'ARC_PHUTIL_PATH=%s %Ls',
+      $libphutil_path,
+      $original_argv);
+  }
 
   exit($err);
 }

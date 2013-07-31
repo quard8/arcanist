@@ -42,6 +42,22 @@ abstract class ArcanistLinter {
     return $this->activePath;
   }
 
+  public function getOtherLocation($offset, $path = null) {
+    if ($path === null) {
+      $path = $this->getActivePath();
+    }
+
+    list($line, $char) = $this->getEngine()->getLineAndCharFromOffset(
+      $path,
+      $offset);
+
+    return array(
+      'path' => $path,
+      'line' => $line + 1,
+      'char' => $char,
+    );
+  }
+
   public function stopAllLinters() {
     $this->stopAllLinters = true;
     return $this;
@@ -143,24 +159,18 @@ abstract class ArcanistLinter {
     $original = null,
     $replacement = null) {
 
-    $dict = array(
-      'path'          => $this->getActivePath(),
-      'line'          => $line,
-      'char'          => $char,
-      'code'          => $this->getLintMessageFullCode($code),
-      'severity'      => $this->getLintMessageSeverity($code),
-      'name'          => $this->getLintMessageName($code),
-      'description'   => $desc,
-    );
+    $message = id(new ArcanistLintMessage())
+      ->setPath($this->getActivePath())
+      ->setLine($line)
+      ->setChar($char)
+      ->setCode($this->getLintMessageFullCode($code))
+      ->setSeverity($this->getLintMessageSeverity($code))
+      ->setName($this->getLintMessageName($code))
+      ->setDescription($desc)
+      ->setOriginalText($original)
+      ->setReplacementText($replacement);
 
-    if ($original !== null) {
-      $dict['original'] = $original;
-    }
-    if ($replacement !== null) {
-      $dict['replacement'] = $replacement;
-    }
-
-    return $this->addLintMessage(ArcanistLintMessage::newFromDictionary($dict));
+    return $this->addLintMessage($message);
   }
 
   protected function raiseLintAtPath(
@@ -208,6 +218,15 @@ abstract class ArcanistLinter {
   abstract public function lintPath($path);
   abstract public function getLinterName();
 
+  public function didRunLinters() {
+    // This is a hook.
+  }
+
+  protected function isCodeEnabled($code) {
+    $severity = $this->getLintMessageSeverity($code);
+    return $this->getEngine()->isSeverityEnabled($severity);
+  }
+
   public function getLintSeverityMap() {
     return array();
   }
@@ -218,6 +237,11 @@ abstract class ArcanistLinter {
 
   public function getCacheGranularity() {
     return self::GRANULARITY_FILE;
+  }
+
+  public function isBinaryFile($path) {
+    // Note that we need the lint engine set before this can be used.
+    return ArcanistDiffUtils::isHeuristicBinaryFile($this->getData($path));
   }
 
 }

@@ -21,7 +21,7 @@ final class PhutilLibraryMapBuilder {
   const LIBRARY_MAP_VERSION       = 2;
 
   const SYMBOL_CACHE_VERSION_KEY  = '__symbol_cache_version__';
-  const SYMBOL_CACHE_VERSION      = 8;
+  const SYMBOL_CACHE_VERSION      = 11;
 
 
 /* -(  Mapping libphutil Libraries  )---------------------------------------- */
@@ -352,7 +352,7 @@ final class PhutilLibraryMapBuilder {
     $absolute_file = $this->getPath($file);
     $bin = dirname(dirname(__FILE__)).'/phutil_symbols.php';
 
-    return new ExecFuture('%s --ugly -- %s', $bin, $absolute_file);
+    return new ExecFuture('php %s --ugly -- %s', $bin, $absolute_file);
   }
 
 
@@ -388,19 +388,17 @@ final class PhutilLibraryMapBuilder {
 
     $map = array();
     foreach ($files as $file => $hash) {
-      if (basename($file) == '__init__.php') {
-        // TODO: Remove this once we kill __init__.php. This just makes the
-        // script run faster until we do, so testing and development is less
-        // annoying.
-        continue;
-      }
-
       $file = Filesystem::readablePath($file, $root);
       $file = ltrim($file, '/');
 
       if (dirname($file) == '.') {
         // We don't permit normal source files at the root level, so just ignore
         // them; they're special library files.
+        continue;
+      }
+
+      if (dirname($file) == 'extensions') {
+        // Ignore files in the extensions/ directory.
         continue;
       }
 

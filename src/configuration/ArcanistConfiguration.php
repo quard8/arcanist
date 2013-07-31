@@ -33,28 +33,25 @@ class ArcanistConfiguration {
   }
 
   public function buildAllWorkflows() {
-    $symbols = id(new PhutilSymbolLoader())
-      ->setType('class')
-      ->setAncestorClass('ArcanistBaseWorkflow')
-      ->selectAndLoadSymbols();
+    $workflows_by_name = array();
 
-    $workflows = array();
-    foreach ($symbols as $symbol) {
-      $class = $symbol['name'];
-      $workflow = newv($class, array());
+    $workflows_by_class_name = id(new PhutilSymbolLoader())
+      ->setAncestorClass('ArcanistBaseWorkflow')
+      ->loadObjects();
+    foreach ($workflows_by_class_name as $class => $workflow) {
       $name = $workflow->getWorkflowName();
 
-      if (isset($workflows[$name])) {
-        $other = get_class($workflows[$name]);
+      if (isset($workflows_by_name[$name])) {
+        $other = get_class($workflows_by_name[$name]);
         throw new Exception(
           "Workflows {$class} and {$other} both implement workflows named ".
           "{$name}.");
       }
 
-      $workflows[$workflow->getWorkflowName()] = $workflow;
+      $workflows_by_name[$name] = $workflow;
     }
 
-    return $workflows;
+    return $workflows_by_name;
   }
 
   final public function isValidWorkflow($workflow) {
@@ -152,7 +149,7 @@ class ArcanistConfiguration {
 
     // We haven't found a real command, alias, or unique prefix. Try similar
     // spellings.
-    $corrected = $this->correctCommandSpelling($command, $all, 2);
+    $corrected = self::correctCommandSpelling($command, $all, 2);
     if (count($corrected) == 1) {
       $console->writeErr(
         pht(
@@ -191,20 +188,73 @@ class ArcanistConfiguration {
     return array_keys($is_prefix);
   }
 
-  private function correctCommandSpelling(
+  public static function correctCommandSpelling(
     $command,
     array $options,
     $max_distance) {
 
+    // Adjust to the scaled edit costs we use below, so "2" roughly means
+    // "2 edits".
+    $max_distance = $max_distance * 3;
+
+    // These costs are somewhat made up, but the theory is that it is far more
+    // likely you will mis-strike a key ("lans" for "land") or press two keys
+    // out of order ("alnd" for "land") than omit keys or press extra keys.
+    $matrix = id(new PhutilEditDistanceMatrix())
+      ->setInsertCost(4)
+      ->setDeleteCost(4)
+      ->setReplaceCost(3)
+      ->setTransposeCost(2);
+
+    return self::correctSpelling($command, $options, $matrix, $max_distance);
+  }
+
+  public static function correctArgumentSpelling($command, array $options) {
+    $max_distance = 1;
+
+    // We are stricter with arguments - we allow only one inserted or deleted
+    // character. It is mainly to handle cases like --no-lint versus --nolint
+    // or --reviewer versus --reviewers.
+    $matrix = id(new PhutilEditDistanceMatrix())
+      ->setInsertCost(1)
+      ->setDeleteCost(1)
+      ->setReplaceCost(10);
+
+    return self::correctSpelling($command, $options, $matrix, $max_distance);
+  }
+
+  public static function correctSpelling(
+    $input,
+    array $options,
+    PhutilEditDistanceMatrix $matrix,
+    $max_distance) {
+
     $distances = array();
+    $inputv = str_split($input);
     foreach ($options as $option) {
-      $distances[$option] = levenshtein($option, $command);
+      $optionv = str_split($option);
+      $matrix->setSequences($optionv, $inputv);
+      $distances[$option] = $matrix->getEditDistance();
     }
 
     asort($distances);
     $best = min($max_distance, reset($distances));
     foreach ($distances as $option => $distance) {
       if ($distance > $best) {
+        unset($distances[$option]);
+      }
+    }
+
+    // Before filtering, check if we have multiple equidistant matches and
+    // return them if we do. This prevents us from, e.g., matching "alnd" with
+    // both "land" and "amend", then dropping "land" for being too short, and
+    // incorrectly completing to "amend".
+    if (count($distances) > 1) {
+      return array_keys($distances);
+    }
+
+    foreach ($distances as $option => $distance) {
+      if (strlen($option) < $distance) {
         unset($distances[$option]);
       }
     }

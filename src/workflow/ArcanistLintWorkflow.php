@@ -5,7 +5,7 @@
  *
  * @group workflow
  */
-class ArcanistLintWorkflow extends ArcanistBaseWorkflow {
+final class ArcanistLintWorkflow extends ArcanistBaseWorkflow {
 
   const RESULT_OKAY       = 0;
   const RESULT_WARNINGS   = 1;
@@ -81,6 +81,7 @@ EOTEXT
         'help' =>
           "With 'summary', show lint warnings in a more compact format. ".
           "With 'json', show lint warnings in machine-readable JSON format. ".
+          "With 'none', show no lint warnings. ".
           "With 'compiler', show lint warnings in suitable for your editor."
       ),
       'only-new' => array(
@@ -117,6 +118,13 @@ EOTEXT
           'When linting git repositories, amend HEAD with autofix '.
           'patches suggested by lint without prompting.',
       ),
+      'everything' => array(
+        'help' => 'Lint all files in the project.',
+        'conflicts' => array(
+          'cache' => '--everything lints all files',
+          'rev' => '--everything lints all files'
+        ),
+      ),
       'severity' => array(
         'param' => 'string',
         'help' =>
@@ -128,7 +136,10 @@ EOTEXT
       ),
       'cache' => array(
         'param' => 'bool',
-        'help' => "0 to disable cache, 1 to enable (default).",
+        'help' =>
+          "0 to disable cache, 1 to enable. The default value is ".
+          "determined by 'arc.lint.cache' in configuration, which defaults ".
+          "to off. See notes in 'arc.lint.cache'.",
       ),
       '*' => 'paths',
     );
@@ -155,6 +166,7 @@ EOTEXT
   }
 
   public function run() {
+    $console = PhutilConsole::getConsole();
     $working_copy = $this->getWorkingCopy();
 
     $engine = $this->getArgument('engine');
@@ -169,7 +181,18 @@ EOTEXT
 
     $rev = $this->getArgument('rev');
     $paths = $this->getArgument('paths');
-    $use_cache = $this->getArgument('cache', true);
+    $use_cache = $this->getArgument('cache', null);
+    $everything = $this->getArgument('everything');
+    if ($everything && $paths) {
+      throw new ArcanistUsageException(
+        "You can not specify paths with --everything. The --everything ".
+        "flag lints every file.");
+    }
+    if ($use_cache === null) {
+      $use_cache = (bool)$working_copy->getConfigFromAnySource(
+        'arc.lint.cache',
+        false);
+    }
 
     if ($rev && $paths) {
       throw new ArcanistUsageException("Specify either --rev or paths.");
@@ -183,7 +206,25 @@ EOTEXT
       $this->shouldLintAll = true;
     }
 
-    $paths = $this->selectPathsForWorkflow($paths, $rev);
+    if ($everything) {
+      // Recurse through project from root
+      switch ($this->getRepositoryApi()->getSourceControlSystemName()) {
+        case 'git':
+          $filter = '*/.git';
+          break;
+        case 'svn':
+          $filter = '*/.svn';
+          break;
+        case 'hg':
+          $filter = '*/.hg';
+          break;
+      }
+      $paths = id(new FileFinder($working_copy->getProjectRoot()))
+        ->excludePath($filter)
+        ->find();
+    } else {
+      $paths = $this->selectPathsForWorkflow($paths, $rev);
+    }
 
     if (!class_exists($engine) ||
         !is_subclass_of($engine, 'ArcanistLintEngine')) {
@@ -195,25 +236,37 @@ EOTEXT
     $engine = newv($engine, array());
     $this->engine = $engine;
     $engine->setWorkingCopy($working_copy);
-
     $engine->setMinimumSeverity(
       $this->getArgument('severity', self::DEFAULT_SEVERITY));
 
+    $file_hashes = array();
     if ($use_cache) {
+      $engine->setRepositoryVersion($this->getRepositoryVersion());
       $cache = $this->readScratchJSONFile('lint-cache.json');
       $cache = idx($cache, $this->getCacheKey(), array());
-      $cache = array_intersect_key($cache, array_flip($paths));
       $cached = array();
-      foreach ($cache as $path => $messages) {
+
+      foreach ($paths as $path) {
         $abs_path = $engine->getFilePathOnDisk($path);
         if (!Filesystem::pathExists($abs_path)) {
           continue;
         }
-        $messages = idx($messages, md5_file($abs_path));
+        $file_hashes[$abs_path] = md5_file($abs_path);
+
+        if (!isset($cache[$path])) {
+          continue;
+        }
+        $messages = idx($cache[$path], $file_hashes[$abs_path]);
         if ($messages !== null) {
           $cached[$path] = $messages;
         }
       }
+
+      if ($cached) {
+        $console->writeErr(
+          pht("Using lint cache, use '--cache 0' to disable it.")."\n");
+      }
+
       $engine->setCachedResults($cached);
     }
 
@@ -373,6 +426,12 @@ EOTEXT
       $prompt_autofix_patches = true;
     }
 
+    $repository_api = $this->getRepositoryAPI();
+    if ($this->shouldAmendChanges) {
+      $this->shouldAmendChanges = $repository_api->supportsAmend() &&
+        !$this->isHistoryImmutable();
+    }
+
     $wrote_to_disk = false;
 
     switch ($this->getArgument('output')) {
@@ -383,6 +442,11 @@ EOTEXT
         break;
       case 'summary':
         $renderer = new ArcanistLintSummaryRenderer();
+        break;
+      case 'none':
+        $prompt_patches = false;
+        $apply_patches = $this->getArgument('apply-patches');
+        $renderer = new ArcanistLintNoneRenderer();
         break;
       case 'compiler':
         $renderer = new ArcanistLintLikeCompilerRenderer();
@@ -396,8 +460,6 @@ EOTEXT
     }
 
     $all_autofix = true;
-
-    $console = PhutilConsole::getConsole();
 
     foreach ($results as $result) {
       $result_all_autofix = $result->isAllAutofix();
@@ -417,10 +479,10 @@ EOTEXT
 
       if ($apply_patches && $result->isPatchable()) {
         $patcher = ArcanistLintPatcher::newFromArcanistLintResult($result);
+        $old_file = $result->getFilePathOnDisk();
 
         if ($prompt_patches &&
             !($result_all_autofix && !$prompt_autofix_patches)) {
-          $old_file = $result->getFilePathOnDisk();
           if (!Filesystem::pathExists($old_file)) {
             $old_file = '/dev/null';
           }
@@ -445,14 +507,11 @@ EOTEXT
 
         $patcher->writePatchToDisk();
         $wrote_to_disk = true;
+        $file_hashes[$old_file] = md5_file($old_file);
       }
     }
 
-    $repository_api = $this->getRepositoryAPI();
-    if ($wrote_to_disk &&
-        ($repository_api instanceof ArcanistGitAPI) &&
-        $this->shouldAmendChanges) {
-
+    if ($wrote_to_disk && $this->shouldAmendChanges) {
       if ($this->shouldAmendWithoutPrompt ||
           ($this->shouldAmendAutofixesWithoutPrompt && $all_autofix)) {
         $console->writeOut(
@@ -464,9 +523,12 @@ EOTEXT
       }
 
       if ($amend) {
-        execx(
-          '(cd %s; git commit -a --amend -C HEAD)',
-          $repository_api->getPath());
+        if ($repository_api instanceof ArcanistGitAPI) {
+          // Add the changes to the index before amending
+          $repository_api->execxLocal('add -u');
+        }
+
+        $repository_api->amendCommit();
       } else {
         throw new ArcanistUsageException(
           "Sort out the lint changes that were applied to the working ".
@@ -480,6 +542,11 @@ EOTEXT
     }
 
     if ($failed) {
+      if ($failed instanceof ArcanistNoEffectException) {
+        if ($renderer instanceof ArcanistLintNoneRenderer) {
+          return 0;
+        }
+      }
       throw $failed;
     }
 
@@ -504,6 +571,7 @@ EOTEXT
     $cache = $this->readScratchJSONFile('lint-cache.json');
     $cached = idx($cache, $this->getCacheKey(), array());
     if ($cached || $use_cache) {
+      $stopped = $engine->getStoppedPaths();
       foreach ($results as $result) {
         $path = $result->getPath();
         if (!$use_cache) {
@@ -514,17 +582,26 @@ EOTEXT
         if (!Filesystem::pathExists($abs_path)) {
           continue;
         }
-        $hash = md5_file($abs_path);
         $version = $result->getCacheVersion();
-        $cached[$path] = array($hash => array($version => array()));
+        $cached_path = array();
+        if (isset($stopped[$path])) {
+          $cached_path['stopped'] = $stopped[$path];
+        }
+        $cached_path['repository_version'] = $this->getRepositoryVersion();
         foreach ($result->getMessages() as $message) {
-          if ($message->isUncacheable()) {
+          $granularity = $message->getGranularity();
+          if ($granularity == ArcanistLinter::GRANULARITY_GLOBAL) {
             continue;
           }
           if (!$message->isPatchApplied()) {
-            $cached[$path][$hash][$version][] = $message->toDictionary();
+            $cached_path[] = $message->toDictionary();
           }
         }
+        $hash = idx($file_hashes, $abs_path);
+        if (!$hash) {
+          $hash = md5_file($abs_path);
+        }
+        $cached[$path] = array($hash => array($version => $cached_path));
       }
       $cache[$this->getCacheKey()] = $cached;
       // TODO: Garbage collection.

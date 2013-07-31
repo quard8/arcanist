@@ -157,7 +157,7 @@ final class ArcanistBaseCommitParser {
         $matches = null;
         if (preg_match('/^exec\((.*)\)$/', $name, $matches)) {
           $root = $this->api->getWorkingCopyIdentity()->getProjectRoot();
-          $future = new ExecFuture($matches[1]);
+          $future = new ExecFuture('%C', $matches[1]);
           $future->setCWD($root);
           list($err, $stdout) = $future->resolve();
           if (!$err) {
@@ -165,6 +165,8 @@ final class ArcanistBaseCommitParser {
           } else {
             return null;
           }
+        } else if (preg_match('/^nodiff\((.*)\)$/', $name, $matches)) {
+          return $this->api->resolveBaseCommitRule($rule, $source);
         }
 
         throw new ArcanistUsageException(

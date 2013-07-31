@@ -101,10 +101,7 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
       return $bin;
     }
 
-    // Look for globally installed JSHint
-    $cmd = (phutil_is_windows()) ? 'where %s' : 'which %s';
-    list($err) = exec_manual($cmd, $bin);
-    if ($err) {
+    if (!Filesystem::binaryExists($bin)) {
       throw new ArcanistUsageException(
         "JSHint does not appear to be installed on this system. Install it ".
         "(e.g., with 'npm install jshint -g') or configure ".
@@ -116,6 +113,10 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
   }
 
   public function willLintPaths(array $paths) {
+    if (!$this->isCodeEnabled(self::JSHINT_ERROR)) {
+      return;
+    }
+
     $jshint_bin = $this->getJSHintPath();
     $jshint_options = $this->getJSHintOptions();
     $futures = array();
@@ -135,6 +136,10 @@ final class ArcanistJSHintLinter extends ArcanistLinter {
   }
 
   public function lintPath($path) {
+    if (!$this->isCodeEnabled(self::JSHINT_ERROR)) {
+      return;
+    }
+
     list($rc, $stdout, $stderr) = $this->results[$path];
 
     if ($rc === 0) {

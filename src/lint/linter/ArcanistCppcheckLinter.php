@@ -23,8 +23,7 @@ final class ArcanistCppcheckLinter extends ArcanistLinter {
     // You will for sure want some options.  The below default tends to be ok
     $options = $working_copy->getConfig(
       'lint.cppcheck.options',
-      '-j2 --inconclusive --enable=performance,style,portability,information'
-    );
+      '-j2 --inconclusive --enable=performance,style,portability,information');
 
     return $options;
   }
@@ -32,43 +31,34 @@ final class ArcanistCppcheckLinter extends ArcanistLinter {
   public function getLintPath() {
     $working_copy = $this->getEngine()->getWorkingCopy();
     $prefix = $working_copy->getConfig('lint.cppcheck.prefix');
-    $bin = $working_copy->getConfig('lint.cppcheck.bin');
+    $bin = $working_copy->getConfig('lint.cppcheck.bin', 'cppcheck');
 
-    if ($bin === null && $prefix === null) {
-      $bin = 'cppcheck';
-    } else {
-      if ($bin === null) {
-        $bin = 'cppcheck';
-      }
-
-      if ($prefix !== null) {
-        if (!Filesystem::pathExists($prefix.'/'.$bin)) {
-          throw new ArcanistUsageException(
-            "Unable to find cppcheck binary in a specified directory. Make ".
-            "sure that 'lint.cppcheck.prefix' and 'lint.cppcheck.bin' keys are".
-            " set correctly. If you'd rather use a copy of cppcheck installed ".
-            "globally, you can just remove these keys from your .arcconfig");
-        }
-
-        $bin = csprintf("%s/%s", $prefix, $bin);
-
-        return $bin;
-      }
-
-      // Look for globally installed cppcheck
-      list($err) = exec_manual('which %s', $bin);
-      if ($err) {
+    if ($prefix !== null) {
+      if (!Filesystem::pathExists($prefix.'/'.$bin)) {
         throw new ArcanistUsageException(
-          "cppcheck does not appear to be installed on this system. Install".
-          "it (from http://cppcheck.sourceforge.net/) or configure".
-          "'lint.cppcheck.prefix' in your .arcconfig to point to the".
-          "directory where it resides."
-        );
+          "Unable to find cppcheck binary in a specified directory. Make ".
+          "sure that 'lint.cppcheck.prefix' and 'lint.cppcheck.bin' keys are ".
+          "set correctly. If you'd rather use a copy of cppcheck installed ".
+          "globally, you can just remove these keys from your .arcconfig.");
       }
+
+      $bin = csprintf("%s/%s", $prefix, $bin);
+
+      return $bin;
+    }
+
+    // Look for globally installed cppcheck
+    list($err) = exec_manual('which %s', $bin);
+    if ($err) {
+      throw new ArcanistUsageException(
+        "cppcheck does not appear to be installed on this system. Install ".
+        "it (from http://cppcheck.sourceforge.net/) or configure ".
+        "'lint.cppcheck.prefix' in your .arcconfig to point to the ".
+        "directory where it resides."
+      );
     }
 
     return $bin;
-
   }
 
   public function lintPath($path) {
@@ -79,8 +69,7 @@ final class ArcanistCppcheckLinter extends ArcanistLinter {
       "%C %C --inline-suppr --xml-version=2 -q %s",
       $bin,
       $options,
-      $this->getEngine()->getFilePathOnDisk($path)
-    );
+      $this->getEngine()->getFilePathOnDisk($path));
 
     if ($rc === 1) {
       throw new Exception("cppcheck failed to run correctly:\n".$stderr);

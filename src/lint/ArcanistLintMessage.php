@@ -18,8 +18,10 @@ final class ArcanistLintMessage {
   protected $replacementText;
   protected $appliedToDisk;
   protected $dependentMessages = array();
+  protected $otherLocations = array();
   protected $obsolete;
-  protected $uncacheable;
+  protected $granularity;
+  protected $bypassChangedLineFiltering;
 
   public static function newFromDictionary(array $dict) {
     $message = new ArcanistLintMessage();
@@ -37,6 +39,11 @@ final class ArcanistLintMessage {
     if (isset($dict['replacement'])) {
       $message->setReplacementText($dict['replacement']);
     }
+    $message->setGranularity(idx($dict, 'granularity'));
+    $message->setOtherLocations(idx($dict, 'locations', array()));
+    if (isset($dict['bypassChangedLineFiltering'])) {
+      $message->bypassChangedLineFiltering($dict['bypassChangedLineFiltering']);
+    }
     return $message;
   }
 
@@ -51,6 +58,9 @@ final class ArcanistLintMessage {
       'description' => $this->getDescription(),
       'original'    => $this->getOriginalText(),
       'replacement' => $this->getReplacementText(),
+      'granularity' => $this->getGranularity(),
+      'locations'   => $this->getOtherLocations(),
+      'bypassChangedLineFiltering' => $this->shouldBypassChangedLineFiltering(),
     );
   }
 
@@ -135,6 +145,19 @@ final class ArcanistLintMessage {
     return $this->replacementText;
   }
 
+  /**
+   * @param dict Keys 'path', 'line', 'char', 'original'.
+   */
+  public function setOtherLocations(array $locations) {
+    assert_instances_of($locations, 'array');
+    $this->otherLocations = $locations;
+    return $this;
+  }
+
+  public function getOtherLocations() {
+    return $this->otherLocations;
+  }
+
   public function isError() {
     return $this->getSeverity() == ArcanistLintSeverity::SEVERITY_ERROR;
   }
@@ -180,19 +203,28 @@ final class ArcanistLintMessage {
     return $this->appliedToDisk;
   }
 
-  public function setUncacheable($bool) {
-    $this->uncacheable = $bool;
+  public function setGranularity($granularity) {
+    $this->granularity = $granularity;
     return $this;
   }
 
-  public function isUncacheable() {
-    return $this->uncacheable;
+  public function getGranularity() {
+    return $this->granularity;
   }
 
   public function setDependentMessages(array $messages) {
     assert_instances_of($messages, 'ArcanistLintMessage');
     $this->dependentMessages = $messages;
     return $this;
+  }
+
+  public function setBypassChangedLineFiltering($bypass_changed_lines) {
+    $this->bypassChangedLineFiltering = $bypass_changed_lines;
+    return $this;
+  }
+
+  public function shouldBypassChangedLineFiltering() {
+    return $this->bypassChangedLineFiltering;
   }
 
 }

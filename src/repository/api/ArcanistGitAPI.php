@@ -29,13 +29,46 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     return $future;
   }
 
+  public function execPassthru($pattern /* , ... */) {
+    $args = func_get_args();
+
+    static $git = null;
+    if ($git === null) {
+      if (phutil_is_windows()) {
+        // NOTE: On Windows, phutil_passthru() uses 'bypass_shell' because
+        // everything goes to hell if we don't. We must provide an absolute
+        // path to Git for this to work properly.
+        $git = Filesystem::resolveBinary('git');
+        $git = csprintf('%s', $git);
+      } else {
+        $git = 'git';
+      }
+    }
+
+    $args[0] = $git.' '.$args[0];
+
+    return call_user_func_array('phutil_passthru', $args);
+  }
+
 
   public function getSourceControlSystemName() {
     return 'git';
   }
 
   public function getMetadataPath() {
-    return $this->getPath('.git');
+    static $path = null;
+    if ($path === null) {
+      list($stdout) = $this->execxLocal('rev-parse --git-dir');
+      $path = rtrim($stdout, "\n");
+      // the output of git rev-parse --git-dir is an absolute path, unless
+      // the cwd is the root of the repository, in which case it uses the
+      // relative path of .git. If we get this relative path, turn it into
+      // an absolute path.
+      if ($path === '.git') {
+        $path = $this->getPath('.git');
+      }
+    }
+    return $path;
   }
 
   public function getHasCommits() {
@@ -89,7 +122,7 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
         : 'log %C --format=%s --',
       $against,
       // NOTE: "%B" is somewhat new, use "%s%n%n%b" instead.
-      '%H%x01%T%x01%P%x01%at%x01%an%x01%s%x01%s%n%n%b%x02');
+      '%H%x01%T%x01%P%x01%at%x01%an%x01%aE%x01%s%x01%s%n%n%b%x02');
 
     $commits = array();
 
@@ -100,8 +133,8 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
 
     $info = explode("\2", $info);
     foreach ($info as $line) {
-      list($commit, $tree, $parents, $time, $author, $title, $message)
-        = explode("\1", trim($line), 7);
+      list($commit, $tree, $parents, $time, $author, $author_email,
+        $title, $message) = explode("\1", trim($line), 8);
       $message = rtrim($message);
 
       $commits[$commit] = array(
@@ -112,6 +145,7 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
         'author'  => $author,
         'summary' => $title,
         'message' => $message,
+        'authorEmail' => $author_email,
       );
     }
 
@@ -379,9 +413,7 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
   public function getCanonicalRevisionName($string) {
     $match = null;
     if (preg_match('/@([0-9]+)$/', $string, $match)) {
-      list($stdout) = $this->execxLocal(
-        'svn find-rev r%d',
-        $match[1]);
+      $stdout = $this->getHashFromFromSVNRevisionNumber($match[1]);
     } else {
       list($stdout) = $this->execxLocal(
         'show -s --format=%C %s',
@@ -390,6 +422,34 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     }
     return rtrim($stdout);
   }
+
+  private function executeSVNFindRev($input, $vcs) {
+    $match = array();
+    list($stdout) = $this->execxLocal(
+      'svn find-rev %s',
+      $input);
+    if (!$stdout) {
+      throw new ArcanistUsageException("Cannot find the {$vcs} equivalent "
+                                       ."of {$input}.");
+    }
+    // When git performs a partial-rebuild during svn
+    // look-up, we need to parse the final line
+    $lines = explode("\n", $stdout);
+    $stdout = $lines[count($lines) - 2];
+    return rtrim($stdout);
+  }
+
+  // Convert svn revision number to git hash
+  public function getHashFromFromSVNRevisionNumber($revision_id) {
+    return $this->executeSVNFindRev("r".$revision_id, "Git");
+  }
+
+
+  // Convert a git hash to svn revision number
+  public function getSVNRevisionNumberFromHash($hash) {
+    return $this->executeSVNFindRev($hash, "SVN");
+  }
+
 
   protected function buildUncommittedStatus() {
     $diff_options = $this->getDiffBaseOptions();
@@ -483,7 +543,7 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
 
   public function addToCommit(array $paths) {
     $this->execxLocal(
-      'add -- %Ls',
+      'add -A -- %Ls',
       $paths);
     $this->reloadWorkingCopy();
     return $this;
@@ -492,8 +552,12 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
   public function doCommit($message) {
     $tmp_file = new TempFile();
     Filesystem::writeFile($tmp_file, $message);
+
+    // NOTE: "--allow-empty-message" was introduced some time after 1.7.0.4,
+    // so we do not provide it and thus require a message.
+
     $this->execxLocal(
-      'commit --allow-empty-message -F %s',
+      'commit -F %s',
       $tmp_file);
 
     $this->reloadWorkingCopy();
@@ -501,12 +565,17 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     return $this;
   }
 
-  public function amendCommit($message) {
-    $tmp_file = new TempFile();
-    Filesystem::writeFile($tmp_file, $message);
-    $this->execxLocal(
-      'commit --amend --allow-empty -F %s',
-      $tmp_file);
+  public function amendCommit($message = null) {
+    if ($message === null) {
+      $this->execxLocal('commit --amend --allow-empty -C HEAD');
+    } else {
+      $tmp_file = new TempFile();
+      Filesystem::writeFile($tmp_file, $message);
+      $this->execxLocal(
+        'commit --amend --allow-empty -F %s',
+        $tmp_file);
+    }
+
     $this->reloadWorkingCopy();
     return $this;
   }
@@ -864,6 +933,24 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     return trim($summary);
   }
 
+  public function backoutCommit($commit_hash) {
+    $this->execxLocal(
+      'revert %s -n --no-edit', $commit_hash);
+    $this->reloadWorkingCopy();
+    if (!$this->getUncommittedStatus()) {
+      throw new ArcanistUsageException(
+        "{$commit_hash} has already been reverted.");
+    }
+  }
+
+  public function getBackoutMessage($commit_hash) {
+    return "This reverts commit ".$commit_hash.".";
+  }
+
+  public function isGitSubversionRepo() {
+    return Filesystem::pathExists($this->getPath('.git/svn'));
+  }
+
   public function resolveBaseCommitRule($rule, $source) {
     list($type, $name) = explode(':', $rule, 2);
 
@@ -962,9 +1049,11 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
             list($err, $upstream) = $this->execManualLocal(
               "rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'");
             if (!$err) {
+              $upstream = rtrim($upstream);
               list($upstream_merge_base) = $this->execxLocal(
                 'merge-base %s HEAD',
                 $upstream);
+              $upstream_merge_base = rtrim($upstream_merge_base);
               $this->setBaseCommitExplanation(
                 "it is the merge-base of the upstream of the current branch ".
                 "and HEAD, and matched the rule '{$rule}' in your {$source} ".
@@ -983,6 +1072,19 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     }
 
     return null;
+  }
+
+  public function canStashChanges() {
+    return true;
+  }
+
+  public function stashChanges() {
+    $this->execxLocal('stash');
+    $this->reloadWorkingCopy();
+  }
+
+  public function unstashChanges() {
+    $this->execxLocal('stash pop');
   }
 
 }

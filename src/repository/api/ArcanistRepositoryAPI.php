@@ -142,7 +142,7 @@ abstract class ArcanistRepositoryAPI {
    */
   final public function getUncommittedStatus() {
     if ($this->uncommittedStatusCache === null) {
-      $status = $this->buildUncommittedStatus();;
+      $status = $this->buildUncommittedStatus();
       ksort($status);
       $this->uncommittedStatusCache = $status;
     }
@@ -288,13 +288,41 @@ abstract class ArcanistRepositoryAPI {
 
       return Filesystem::resolvePath(rtrim($stdout, "\n"), $root);
     } catch (CommandException $ex) {
-      if (preg_match('/^fatal: Not a git repository/', $ex->getStdErr())) {
-        return null;
-      }
-      throw $ex;
+      // This might be because the $root isn't a Git working copy, or the user
+      // might not have Git installed at all so the `git` command fails. Assume
+      // that users trying to work with git working copies will have a working
+      // `git` binary.
+      return null;
     }
   }
 
+  /**
+   * Fetches the original file data for each path provided.
+   *
+   * @return map<string, string> Map from path to file data.
+   */
+  public function getBulkOriginalFileData($paths) {
+    $filedata = array();
+    foreach ($paths as $path) {
+      $filedata[$path] = $this->getOriginalFileData($path);
+    }
+
+    return $filedata;
+  }
+
+  /**
+   * Fetches the current file data for each path provided.
+   *
+   * @return map<string, string> Map from path to file data.
+   */
+  public function getBulkCurrentFileData($paths) {
+    $filedata = array();
+    foreach ($paths as $path) {
+      $filedata[$path] = $this->getCurrentFileData($path);
+    }
+
+    return $filedata;
+  }
 
   /**
    * @return Traversable
@@ -342,7 +370,7 @@ abstract class ArcanistRepositoryAPI {
     throw new ArcanistCapabilityNotSupportedException($this);
   }
 
-  public function amendCommit($message) {
+  public function amendCommit($message = null) {
     throw new ArcanistCapabilityNotSupportedException($this);
   }
 
@@ -394,6 +422,17 @@ abstract class ArcanistRepositoryAPI {
 
   abstract protected function buildLocalFuture(array $argv);
 
+  public function canStashChanges() {
+    return false;
+  }
+
+  public function stashChanges() {
+    throw new ArcanistCapabilityNotSupportedException($this);
+  }
+
+  public function unstashChanges() {
+    throw new ArcanistCapabilityNotSupportedException($this);
+  }
 
 /* -(  Scratch Files  )------------------------------------------------------ */
 

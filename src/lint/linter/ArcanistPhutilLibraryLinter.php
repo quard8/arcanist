@@ -57,7 +57,7 @@ final class ArcanistPhutilLibraryLinter extends ArcanistLinter {
       // Do these one at a time since they individually fanout to saturate
       // available system resources.
       $future = new ExecFuture(
-        '%s --show --quiet --ugly -- %s',
+        'php %s --show --quiet --ugly -- %s',
         $bin,
         phutil_get_library_root($lib));
       $symbols[$lib] = $future->resolveJSON();
@@ -134,14 +134,18 @@ final class ArcanistPhutilLibraryLinter extends ArcanistLinter {
       }
     }
 
+    $types = array('class', 'function', 'interface', 'class/interface');
     foreach ($symbols as $library => $map) {
       // Check for unknown symbols: uses of classes, functions or interfaces
       // which are not defined anywhere. We reference the list of all symbols
       // we built up earlier.
       foreach ($map as $file => $spec) {
         $need = idx($spec, 'need', array());
-        foreach (array('class', 'function', 'interface') as $type) {
-          $libtype = ($type == 'interface') ? 'class' : $type;
+        foreach ($types as $type) {
+          $libtype = $type;
+          if ($type == 'interface' || $type == 'class/interface') {
+            $libtype = 'class';
+          }
           foreach (idx($need, $type, array()) as $symbol => $offset) {
             if (!empty($all_symbols[$libtype][$symbol])) {
               // Symbol is defined somewhere.
@@ -154,7 +158,9 @@ final class ArcanistPhutilLibraryLinter extends ArcanistLinter {
               $offset,
               self::LINT_UNKNOWN_SYMBOL,
               "Use of unknown {$type} '{$symbol}'. This symbol is not defined ".
-              "in any loaded phutil library.");
+              "in any loaded phutil library. It might be misspelled, or it ".
+              "may have been added recently. Make sure libphutil and other ".
+              "libraries are up to date.");
           }
         }
       }
