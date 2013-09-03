@@ -40,7 +40,7 @@ final class ArcanistMercurialAPI extends ArcanistRepositoryAPI {
   public function execPassthru($pattern /* , ... */) {
     $args = func_get_args();
     if (phutil_is_windows()) {
-      $args[0] = 'set HGPLAIN=1 & hg '.$args[0];
+      $args[0] = 'hg '.$args[0];
     } else {
       $args[0] = 'HGPLAIN=1 hg '.$args[0];
     }
@@ -917,7 +917,7 @@ final class ArcanistMercurialAPI extends ArcanistRepositoryAPI {
   }
 
   public function isHgSubversionRepo() {
-    return file_exists($this->getPath('.hg/svn'));
+    return file_exists($this->getPath('.hg/svn/rev_map'));
   }
 
   public function getSubversionInfo() {

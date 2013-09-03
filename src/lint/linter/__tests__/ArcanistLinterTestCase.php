@@ -7,13 +7,13 @@
  */
 abstract class ArcanistLinterTestCase extends ArcanistPhutilTestCase {
 
-  public function executeTestsInDirectory($root, $linter, $working_copy) {
+  public function executeTestsInDirectory($root, ArcanistLinter $linter) {
     foreach (Filesystem::listDirectory($root, $hidden = false) as $file) {
-      $this->lintFile($root.$file, $linter, $working_copy);
+      $this->lintFile($root.$file, $linter);
     }
   }
 
-  private function lintFile($file, $linter, $working_copy) {
+  private function lintFile($file, $linter) {
     $linter = clone $linter;
 
     $contents = Filesystem::readFile($file);
@@ -39,17 +39,14 @@ abstract class ArcanistLinterTestCase extends ArcanistPhutilTestCase {
       $config = array();
     }
 
-    /* TODO: ?
-    validate_parameter_list(
+    PhutilTypeSpec::checkMap(
       $config,
       array(
-      ),
-      array(
-        'project' => true,
-        'path' => true,
-        'hook' => true,
+        'hook' => 'optional bool',
+        'config' => 'optional wild',
+        'path' => 'optional string',
+        'arcconfig' => 'optional map<string, string>',
       ));
-    */
 
     $exception = null;
     $after_lint = null;
@@ -58,7 +55,22 @@ abstract class ArcanistLinterTestCase extends ArcanistPhutilTestCase {
     $caught_exception = false;
     try {
 
-      $path = idx($config, 'path', 'lint/'.$basename.'.php');
+      $tmp = new TempFile($basename);
+      Filesystem::writeFile($tmp, $data);
+      $full_path = (string)$tmp;
+
+      $dir = dirname($full_path);
+      $path = basename($full_path);
+      $config_file = null;
+      $arcconfig = idx($config, 'arcconfig');
+      if ($arcconfig) {
+        $config_file = json_encode($arcconfig);
+      }
+
+      $working_copy = ArcanistWorkingCopyIdentity::newFromRootAndConfigFile(
+        $dir,
+        $config_file,
+        'Unit Test');
 
       $engine = new UnitTestableArcanistLintEngine();
       $engine->setWorkingCopy($working_copy);
@@ -66,14 +78,16 @@ abstract class ArcanistLinterTestCase extends ArcanistPhutilTestCase {
 
       $engine->setCommitHookMode(idx($config, 'hook', false));
 
-      $linter->addPath($path);
-      $linter->addData($path, $data);
+      $path_name = idx($config, 'path', $path);
+      $linter->addPath($path_name);
+      $linter->addData($path_name, $data);
       $linter->setConfig(idx($config, 'config', array()));
 
       $engine->addLinter($linter);
-      $engine->addFileData($path, $data);
+      $engine->addFileData($path_name, $data);
 
       $results = $engine->run();
+
       $this->assertEqual(
         1,
         count($results),
